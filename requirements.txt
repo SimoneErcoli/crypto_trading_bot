@@ -1,0 +1,11 @@
+krakenex==2.1.0
+pykrakenapi==0.3.1
+pandas>=2.2.2,<3
+pandas-ta==0.4.71b0
+python-telegram-bot==21.5
+schedule==1.2.2
+python-dotenv==1.0.1
+loguru==0.7.2
+requests==2.32.3
+numpy>=2.2.6
+streamlit>=1.35.0
