@@ -1,10 +1,11 @@
 """
 Computes technical indicators (RSI, EMA, MACD, Volume) and generates
 BUY / SELL / HOLD signals for each asset on 4h candles.
+Signal thresholds are read from the active StrategyConfig.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 import pandas as pd
 import pandas_ta as ta
@@ -12,25 +13,20 @@ from loguru import logger
 
 Signal = Literal["BUY", "SELL", "HOLD"]
 
-RSI_BUY_LOW = 35
-RSI_BUY_HIGH = 50
-RSI_SELL = 72
-VOLUME_MULTIPLIER = 1.3
-
 
 @dataclass
 class SignalResult:
     signal: Signal
     rsi: float
-    ema50_above: bool
+    ema_above: bool         # True if close > configured EMA reference
     macd_bullish: bool
     volume_surge: bool
     close: float
     reason: str
+    ema_ref: str            # "ema20" | "ema50" — which EMA was used
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add RSI, EMA20/50/200, MACD and Volume MA columns to the DataFrame."""
     df = df.copy()
     df["rsi"] = ta.rsi(df["close"], length=14)
     df["ema20"] = ta.ema(df["close"], length=20)
@@ -47,19 +43,12 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _is_macd_bullish_crossover(df: pd.DataFrame) -> bool:
-    """True if MACD crossed above signal on the last candle."""
     if len(df) < 2:
         return False
-    prev_hist = df["macd_hist"].iloc[-2]
-    curr_hist = df["macd_hist"].iloc[-1]
-    return prev_hist <= 0 and curr_hist > 0
+    return df["macd_hist"].iloc[-2] <= 0 and df["macd_hist"].iloc[-1] > 0
 
 
 def _is_bearish_divergence(df: pd.DataFrame, lookback: int = 5) -> bool:
-    """
-    Bearish divergence: price made higher high but MACD histogram made lower high
-    over the last `lookback` candles.
-    """
     if len(df) < lookback + 1:
         return False
     recent = df.iloc[-lookback:]
@@ -68,61 +57,67 @@ def _is_bearish_divergence(df: pd.DataFrame, lookback: int = 5) -> bool:
     return price_higher and macd_lower
 
 
-def evaluate_signal(df: pd.DataFrame, asset: str) -> SignalResult:
+def evaluate_signal(
+    df: pd.DataFrame,
+    asset: str,
+    cfg=None,
+) -> SignalResult:
     """
     Evaluate the latest closed candle and return a SignalResult.
-    The DataFrame must have at least 200 rows with columns:
-    open, high, low, close, volume.
+    cfg is a StrategyConfig; if None, the active env config is loaded.
     """
+    from risk_manager import get_strategy_config
+    if cfg is None:
+        cfg = get_strategy_config()
+
     if len(df) < 200:
         logger.warning(f"{asset}: not enough candles ({len(df)} < 200), returning HOLD")
-        return SignalResult("HOLD", 0, False, False, False, 0, "insufficient data")
+        return SignalResult("HOLD", 0, False, False, False, 0, "insufficient data", cfg.ema_ref)
 
     df = compute_indicators(df)
 
-    # Use the second-to-last row so we only trade on fully closed candles
     row = df.iloc[-2]
-    prev_row = df.iloc[-3] if len(df) >= 3 else df.iloc[-2]
 
-    rsi = float(row["rsi"])
-    close = float(row["close"])
-    ema50 = float(row["ema50"])
+    rsi      = float(row["rsi"])
+    close    = float(row["close"])
+    ema_val  = float(row[cfg.ema_ref])
     macd_hist = float(row["macd_hist"])
-    volume = float(row["volume"])
+    volume   = float(row["volume"])
     vol_ma20 = float(row["vol_ma20"])
 
-    # ── SELL conditions (any one triggers) ───────────────────────────────────
-    if rsi > RSI_SELL:
-        return SignalResult("SELL", rsi, close > ema50, False, False, close,
-                            f"RSI overbought ({rsi:.1f} > {RSI_SELL})")
+    ema_above = close > ema_val
+
+    # ── SELL conditions ───────────────────────────────────────────────────────
+    if rsi > cfg.rsi_sell:
+        return SignalResult("SELL", rsi, ema_above, False, False, close,
+                            f"RSI overbought ({rsi:.1f} > {cfg.rsi_sell})", cfg.ema_ref)
 
     if _is_bearish_divergence(df):
-        return SignalResult("SELL", rsi, close > ema50, False, False, close,
-                            "bearish MACD divergence")
+        return SignalResult("SELL", rsi, ema_above, False, False, close,
+                            "bearish MACD divergence", cfg.ema_ref)
 
-    # ── BUY conditions (all must be true) ────────────────────────────────────
-    rsi_ok = RSI_BUY_LOW <= rsi <= RSI_BUY_HIGH
-    ema50_above = close > ema50
+    # ── BUY conditions ────────────────────────────────────────────────────────
+    rsi_ok       = cfg.rsi_buy_low <= rsi <= cfg.rsi_buy_high
     macd_bullish = macd_hist > 0 or _is_macd_bullish_crossover(df)
-    volume_surge = vol_ma20 > 0 and volume > vol_ma20 * VOLUME_MULTIPLIER
+    volume_surge = vol_ma20 > 0 and volume > vol_ma20 * cfg.volume_multiplier
 
-    if rsi_ok and ema50_above and macd_bullish and volume_surge:
-        return SignalResult("BUY", rsi, ema50_above, macd_bullish, volume_surge, close,
-                            "all buy conditions met")
+    if rsi_ok and ema_above and macd_bullish and volume_surge:
+        return SignalResult("BUY", rsi, ema_above, macd_bullish, volume_surge, close,
+                            "all buy conditions met", cfg.ema_ref)
 
     missing = []
     if not rsi_ok:
-        missing.append(f"RSI={rsi:.1f} (need {RSI_BUY_LOW}–{RSI_BUY_HIGH})")
-    if not ema50_above:
-        missing.append(f"close {close:.2f} < EMA50 {ema50:.2f}")
+        missing.append(f"RSI={rsi:.1f} (need {cfg.rsi_buy_low}-{cfg.rsi_buy_high})")
+    if not ema_above:
+        missing.append(f"close {close:.2f} < {cfg.ema_ref.upper()} {ema_val:.2f}")
     if not macd_bullish:
         missing.append("MACD not bullish")
     if not volume_surge:
         vol_ratio = volume / vol_ma20 if vol_ma20 > 0 else 0
-        missing.append(f"volume ratio {vol_ratio:.2f}x (need >{VOLUME_MULTIPLIER}x)")
+        missing.append(f"volume {vol_ratio:.2f}x (need >{cfg.volume_multiplier}x)")
 
-    return SignalResult("HOLD", rsi, ema50_above, macd_bullish, volume_surge, close,
-                        "missing: " + "; ".join(missing))
+    return SignalResult("HOLD", rsi, ema_above, macd_bullish, volume_surge, close,
+                        "missing: " + "; ".join(missing), cfg.ema_ref)
 
 
 def check_exit_conditions(
@@ -130,21 +125,19 @@ def check_exit_conditions(
     current_price: float,
     position: dict,
 ) -> tuple[bool, str]:
-    """
-    Returns (should_exit, reason) based on price levels alone.
-    Order-driven exits (SL/TP) are handled by Kraken native orders;
-    this catches any case where the bot needs to act directly.
-    """
     from decimal import Decimal
 
-    entry = Decimal(str(position["entry_price"]))
-    sl = Decimal(str(position["sl"]))
-    tp1 = Decimal(str(position["tp1"]))
-    tp2 = Decimal(str(position["tp2"]))
-    price = Decimal(str(current_price))
+    price  = Decimal(str(current_price))
+    sl     = Decimal(str(position["sl"]))
+    tp1    = Decimal(str(position["tp1"]))
+    tp2    = Decimal(str(position["tp2"]))
+    tp3_raw = position.get("tp3")
+    tp3    = Decimal(str(tp3_raw)) if tp3_raw else None
 
     if price <= sl:
         return True, "stop_loss"
+    if tp3 and not position.get("tp3_hit") and not position.get("tp2_hit") and price >= tp3:
+        return True, "tp3"
     if not position.get("tp2_hit") and price >= tp2:
         return True, "tp2"
     if not position.get("tp1_hit") and price >= tp1:

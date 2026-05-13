@@ -4,6 +4,7 @@ All monetary calculations use Decimal to avoid floating-point errors.
 """
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
@@ -19,7 +20,6 @@ MIN_ORDER_SIZE: dict[str, Decimal] = {
     "XRP": Decimal("10"),
 }
 
-# Decimal precision for each asset
 ASSET_DECIMALS: dict[str, int] = {
     "BTC": 6,
     "ETH": 5,
@@ -27,7 +27,6 @@ ASSET_DECIMALS: dict[str, int] = {
     "XRP": 2,
 }
 
-# Capital allocations (must sum to 1.0)
 ALLOCATIONS: dict[str, Decimal] = {
     "BTC": Decimal("0.40"),
     "ETH": Decimal("0.30"),
@@ -35,11 +34,82 @@ ALLOCATIONS: dict[str, Decimal] = {
     "XRP": Decimal("0.10"),
 }
 
-STOP_LOSS_PCT = Decimal("0.03")     # -3%
-TP1_PCT = Decimal("0.05")           # +5%
-TP2_PCT = Decimal("0.10")           # +10%
-
 PAUSE_FILE = Path(".pause_until")
+
+
+# ── Strategy configuration ────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    name: str
+    # Signal thresholds
+    rsi_buy_low: int
+    rsi_buy_high: int
+    rsi_sell: int
+    ema_ref: str                    # "ema20" | "ema50"
+    volume_multiplier: float
+    # Risk/reward
+    sl_pct: Decimal
+    tp1_pct: Decimal
+    tp1_close_pct: Decimal          # fraction of position closed at TP1
+    tp2_pct: Decimal
+    tp2_close_pct: Decimal
+    tp3_pct: Optional[Decimal]      # None = no TP3
+    tp3_close_pct: Optional[Decimal]
+    # Behaviour
+    cooldown_hours: int
+    max_consecutive_losses: int     # losses before global pause
+    size_multiplier: Decimal        # 1.0 = normal allocation
+
+
+CONSERVATIVE = StrategyConfig(
+    name="conservative",
+    rsi_buy_low=35,
+    rsi_buy_high=50,
+    rsi_sell=72,
+    ema_ref="ema50",
+    volume_multiplier=1.3,
+    sl_pct=Decimal("0.03"),
+    tp1_pct=Decimal("0.05"),
+    tp1_close_pct=Decimal("0.50"),
+    tp2_pct=Decimal("0.10"),
+    tp2_close_pct=Decimal("0.30"),
+    tp3_pct=None,
+    tp3_close_pct=None,
+    cooldown_hours=4,
+    max_consecutive_losses=2,
+    size_multiplier=Decimal("1.0"),
+)
+
+AGGRESSIVE = StrategyConfig(
+    name="aggressive",
+    rsi_buy_low=30,
+    rsi_buy_high=58,
+    rsi_sell=78,
+    ema_ref="ema20",
+    volume_multiplier=1.1,
+    sl_pct=Decimal("0.015"),
+    tp1_pct=Decimal("0.03"),
+    tp1_close_pct=Decimal("0.40"),
+    tp2_pct=Decimal("0.07"),
+    tp2_close_pct=Decimal("0.35"),
+    tp3_pct=Decimal("0.15"),
+    tp3_close_pct=Decimal("0.25"),
+    cooldown_hours=1,
+    max_consecutive_losses=3,
+    size_multiplier=Decimal("1.25"),
+)
+
+_CONFIGS = {"conservative": CONSERVATIVE, "aggressive": AGGRESSIVE}
+
+
+def get_strategy_config() -> StrategyConfig:
+    name = os.getenv("STRATEGIA", "conservative").lower().strip()
+    cfg = _CONFIGS.get(name)
+    if cfg is None:
+        logger.warning(f"Unknown STRATEGIA='{name}', falling back to conservative")
+        return CONSERVATIVE
+    return cfg
 
 
 # ── Global pause ──────────────────────────────────────────────────────────────
@@ -82,15 +152,14 @@ def calculate_position_size(
     price: Decimal,
     capital: Decimal,
     available_balance: Decimal,
+    cfg: Optional[StrategyConfig] = None,
 ) -> tuple[Decimal, Decimal]:
-    """
-    Returns (size_eur, size_asset) respecting allocation, available balance,
-    and Kraken minimums.  Returns (0, 0) if the trade cannot be sized.
-    """
-    allocation = ALLOCATIONS[asset]
-    target_eur = (capital * allocation).quantize(Decimal("0.01"))
+    if cfg is None:
+        cfg = get_strategy_config()
 
-    # Never spend more than what's available
+    allocation = ALLOCATIONS[asset]
+    target_eur = (capital * allocation * cfg.size_multiplier).quantize(Decimal("0.01"))
+
     size_eur = min(target_eur, available_balance)
     if size_eur <= Decimal("0"):
         logger.warning(f"{asset}: no balance available (need €{target_eur}, have €{available_balance})")
@@ -101,24 +170,29 @@ def calculate_position_size(
 
     min_size = MIN_ORDER_SIZE[asset]
     if size_asset < min_size:
-        logger.warning(
-            f"{asset}: computed size {size_asset} < minimum {min_size}. Skipping."
-        )
+        logger.warning(f"{asset}: computed size {size_asset} < minimum {min_size}. Skipping.")
         return Decimal("0"), Decimal("0")
 
-    # Recalculate EUR after rounding down
     size_eur = (size_asset * price).quantize(Decimal("0.01"))
     return size_eur, size_asset
 
 
 def calculate_levels(
     entry_price: Decimal,
-) -> tuple[Decimal, Decimal, Decimal]:
-    """Returns (stop_loss, tp1, tp2) prices."""
-    sl = (entry_price * (Decimal("1") - STOP_LOSS_PCT)).quantize(Decimal("0.01"))
-    tp1 = (entry_price * (Decimal("1") + TP1_PCT)).quantize(Decimal("0.01"))
-    tp2 = (entry_price * (Decimal("1") + TP2_PCT)).quantize(Decimal("0.01"))
-    return sl, tp1, tp2
+    cfg: Optional[StrategyConfig] = None,
+) -> tuple[Decimal, Decimal, Decimal, Optional[Decimal]]:
+    """Returns (stop_loss, tp1, tp2, tp3_or_None)."""
+    if cfg is None:
+        cfg = get_strategy_config()
+
+    sl  = (entry_price * (Decimal("1") - cfg.sl_pct)).quantize(Decimal("0.01"))
+    tp1 = (entry_price * (Decimal("1") + cfg.tp1_pct)).quantize(Decimal("0.01"))
+    tp2 = (entry_price * (Decimal("1") + cfg.tp2_pct)).quantize(Decimal("0.01"))
+    tp3 = (
+        (entry_price * (Decimal("1") + cfg.tp3_pct)).quantize(Decimal("0.01"))
+        if cfg.tp3_pct is not None else None
+    )
+    return sl, tp1, tp2, tp3
 
 
 def floor_asset(value: Decimal, asset: str) -> Decimal:

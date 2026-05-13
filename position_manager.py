@@ -155,9 +155,12 @@ def build_new_position(
     sl: Decimal,
     tp1: Decimal,
     tp2: Decimal,
+    tp3: Optional[Decimal] = None,
+    strategy: str = "conservative",
 ) -> dict:
     return {
-        "active": False,  # set True when entry order fills
+        "active": False,
+        "strategy": strategy,
         "entry_price": str(entry_price),
         "entry_time": None,
         "size_eur": str(size_eur),
@@ -166,11 +169,14 @@ def build_new_position(
         "order_id_sl": None,
         "order_id_tp1": None,
         "order_id_tp2": None,
+        "order_id_tp3": None,
         "sl": str(sl),
         "tp1": str(tp1),
         "tp2": str(tp2),
+        "tp3": str(tp3) if tp3 is not None else None,
         "tp1_hit": False,
         "tp2_hit": False,
+        "tp3_hit": False,
         "consecutive_losses": 0,
         "close_time": None,
     }

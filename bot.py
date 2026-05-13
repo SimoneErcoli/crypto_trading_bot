@@ -69,10 +69,11 @@ def scan_all_assets() -> None:
         logger.info(f"Bot is paused until {resume}. Skipping scan.")
         return
 
+    cfg = rm.get_strategy_config()
     scan_results = []
     for asset in ASSETS:
         try:
-            result = _scan_asset(asset)
+            result = _scan_asset(asset, cfg)
             if result:
                 scan_results.append(result)
         except Exception as exc:
@@ -85,14 +86,14 @@ def scan_all_assets() -> None:
 
     if scan_results:
         try:
-            notify_scan_summary(scan_results, _next_scan_time())
+            notify_scan_summary(scan_results, _next_scan_time(), strategy=cfg.name)
         except Exception as exc:
             logger.warning(f"Could not send scan summary: {exc}")
 
     logger.info("── Scan complete ──")
 
 
-def _scan_asset(asset: str) -> dict:
+def _scan_asset(asset: str, cfg=None) -> dict:
     # Skip if already in position
     if pm.has_active_position(asset):
         logger.info(f"{asset}: position already open — checking exit conditions")
@@ -105,8 +106,10 @@ def _scan_asset(asset: str) -> dict:
         return {"asset": asset, "skipped": True, "skip_reason": "cooldown 4h"}
 
     # Fetch candles and evaluate signal
+    if cfg is None:
+        cfg = rm.get_strategy_config()
     df = kc.get_ohlcv(asset, interval=240, count=200)
-    result = st.evaluate_signal(df, asset)
+    result = st.evaluate_signal(df, asset, cfg)
     logger.info(f"{asset}: signal={result.signal} | {result.reason}")
 
     if result.signal == "BUY":
@@ -118,7 +121,9 @@ def _scan_asset(asset: str) -> dict:
         "skipped": False,
         "signal": result.signal,
         "rsi": result.rsi,
-        "ema50_above": result.ema50_above,
+        "rsi_ok": cfg.rsi_buy_low <= result.rsi <= cfg.rsi_buy_high,
+        "ema_above": result.ema_above,
+        "ema_ref": result.ema_ref,
         "macd_bullish": result.macd_bullish,
         "volume_surge": result.volume_surge,
         "close": result.close,
@@ -199,8 +204,9 @@ def main() -> None:
 
     paper = rm.is_paper_trading()
     capital = rm.get_capital()
+    cfg = rm.get_strategy_config()
 
-    logger.info(f"Bot starting — paper={paper}, capital=€{capital}")
+    logger.info(f"Bot starting — paper={paper}, capital=€{capital}, strategy={cfg.name}")
 
     # Try to read actual Kraken balance; fall back to configured capital
     try:
@@ -218,6 +224,7 @@ def main() -> None:
         assets=ASSETS,
         paper=paper,
         next_scan=next_scan,
+        strategy=cfg.name,
     )
 
     # Align first run to the 4h candle boundary

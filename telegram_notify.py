@@ -46,13 +46,16 @@ def notify_startup(
     assets: list[str],
     paper: bool,
     next_scan: str,
+    strategy: str = "conservative",
 ) -> None:
     mode_line = "⚠️ Modalità: LIVE TRADING" if not paper else "ℹ️ Modalità: PAPER TRADING"
+    strategy_icon = "🔥 Aggressiva" if strategy == "aggressive" else "🛡 Conservativa"
     assets_str = " ".join(assets)
     text = (
         f"🤖 Bot avviato — {'ORDINI REALI' if not paper else 'PAPER TRADING'}\n"
         f"{SEP}\n"
         f"{mode_line}\n"
+        f"Strategia: {strategy_icon}\n"
         f"Capitale: €{capital}\n"
         f"Asset: {assets_str}\n"
         f"Scan ogni: 4h\n"
@@ -88,33 +91,45 @@ def notify_position_opened(
     sl: Decimal,
     tp1: Decimal,
     tp2: Decimal,
+    cfg,
     rsi: float,
-    ema50_above: bool,
+    ema_above: bool,
+    ema_ref: str,
     macd_bullish: bool,
     volume_surge: bool,
     fee: Decimal,
+    tp3: Optional[Decimal] = None,
 ) -> None:
-    sl_pct = "-3%"
-    tp1_pct = "+5%"
-    tp2_pct = "+10%"
-    text = (
-        f"🟢 POSIZIONE APERTA — {asset}/EUR\n"
-        f"{SEP}\n"
-        f"✅ Ordine eseguito\n"
-        f"💰 Prezzo entrata: €{entry_price}\n"
-        f"📦 Quantità: {size_asset} {asset}\n"
-        f"💵 Valore: €{size_eur}\n"
-        f"🛡 Stop Loss: €{sl} ({sl_pct}) → ordine piazzato\n"
-        f"🎯 TP1: €{tp1} ({tp1_pct}) → ordine piazzato\n"
-        f"🎯 TP2: €{tp2} ({tp2_pct}) → ordine piazzato\n"
-        f"{SEP}\n"
-        f"RSI: {rsi:.1f} {'✅' if rsi else '❌'}\n"
-        f"EMA50: {'sopra ✅' if ema50_above else 'sotto ❌'}\n"
-        f"MACD: {'bullish ✅' if macd_bullish else 'bearish ❌'}\n"
-        f"Volume: {'✅' if volume_surge else '❌'}\n"
-        f"Fee pagata: €{fee}"
-    )
-    _send(text)
+    sl_pct  = f"-{int(cfg.sl_pct * 100)}%"
+    tp1_pct = f"+{int(cfg.tp1_pct * 100)}%"
+    tp2_pct = f"+{int(cfg.tp2_pct * 100)}%"
+    strategy_icon = "🔥" if cfg.name == "aggressive" else "🛡"
+
+    lines = [
+        f"🟢 POSIZIONE APERTA — {asset}/EUR  {strategy_icon}",
+        SEP,
+        f"✅ Ordine eseguito",
+        f"💰 Prezzo entrata: €{entry_price}",
+        f"📦 Quantità: {size_asset} {asset}",
+        f"💵 Valore: €{size_eur}",
+        f"🛡 Stop Loss: €{sl} ({sl_pct}) → ordine piazzato",
+        f"🎯 TP1: €{tp1} ({tp1_pct}) → chiude {int(cfg.tp1_close_pct*100)}%",
+        f"🎯 TP2: €{tp2} ({tp2_pct}) → chiude {int(cfg.tp2_close_pct*100)}%",
+    ]
+    if tp3 and cfg.tp3_pct:
+        tp3_pct = f"+{int(cfg.tp3_pct * 100)}%"
+        lines.append(f"🚀 TP3: €{tp3} ({tp3_pct}) → chiude {int(cfg.tp3_close_pct*100)}%")
+
+    ema_label = ema_ref.upper()
+    lines += [
+        SEP,
+        f"RSI: {rsi:.1f} {'✅' if cfg.rsi_buy_low <= rsi <= cfg.rsi_buy_high else '❌'}",
+        f"{ema_label}: {'sopra ✅' if ema_above else 'sotto ❌'}",
+        f"MACD: {'bullish ✅' if macd_bullish else 'bearish ❌'}",
+        f"Volume: {'✅' if volume_surge else '❌'}",
+        f"Fee pagata: €{fee}",
+    ]
+    _send("\n".join(lines))
 
 
 def notify_order_expired(asset: str, order_id: str, current_price: Decimal) -> None:
@@ -138,16 +153,19 @@ def notify_tp1_hit(
     tp2: Decimal,
     remaining_size: Decimal,
     remaining_value: Decimal,
+    tp3: Optional[Decimal] = None,
 ) -> None:
     sign = "+" if profit >= 0 else ""
+    next_target = f"🚀 TP3 ancora aperto a €{tp3}" if tp3 else f"🎯 TP2 ancora aperto a €{tp2}"
     text = (
         f"🟡 TP1 RAGGIUNTO — {asset}/EUR\n"
         f"{SEP}\n"
-        f"✅ Venduto 50% a €{tp1_price}\n"
+        f"✅ Venduto parziale a €{tp1_price}\n"
         f"💵 Incassato: €{tp1_value}\n"
         f"📈 Profitto netto (fee incluse): {sign}€{profit}\n"
         f"📍 SL spostato al breakeven: €{breakeven}\n"
         f"🎯 TP2 ancora aperto a €{tp2}\n"
+        f"{next_target}\n"
         f"Rimane: {remaining_size} {asset} (€{remaining_value})"
     )
     _send(text)
@@ -159,8 +177,22 @@ def notify_tp2_hit(
     tp2_price: Decimal,
     profit_total: Decimal,
     roi: Decimal,
+    final: bool = True,
+    tp3: Optional[Decimal] = None,
 ) -> None:
     sign = "+" if profit_total >= 0 else ""
+    if not final and tp3:
+        text = (
+            f"🟠 TP2 RAGGIUNTO — {asset}/EUR\n"
+            f"{SEP}\n"
+            f"✅ Venduto parziale a €{tp2_price}\n"
+            f"💵 Incassato: €{(tp2_size * tp2_price).quantize(Decimal('0.01'))}\n"
+            f"📈 Profitto parziale: {sign}€{profit_total}\n"
+            f"🚀 TP3 ancora aperto a €{tp3}\n"
+            f"Posizione ancora attiva."
+        )
+        _send(text)
+        return
     text = (
         f"🏆 TP2 RAGGIUNTO — {asset}/EUR\n"
         f"{SEP}\n"
@@ -169,6 +201,26 @@ def notify_tp2_hit(
         f"💵 Profitto totale trade: {sign}€{profit_total}\n"
         f"📊 ROI trade: {sign}{roi}%\n"
         f"⏸ {asset} in pausa per 4h"
+    )
+    _send(text)
+
+
+def notify_tp3_hit(
+    asset: str,
+    tp3_size: Decimal,
+    tp3_price: Decimal,
+    profit_total: Decimal,
+    roi: Decimal,
+) -> None:
+    sign = "+" if profit_total >= 0 else ""
+    text = (
+        f"🚀 TP3 RAGGIUNTO — {asset}/EUR\n"
+        f"{SEP}\n"
+        f"✅ Posizione chiusa completamente\n"
+        f"Venduto {tp3_size} {asset} a €{tp3_price}\n"
+        f"💵 Profitto totale trade: {sign}€{profit_total}\n"
+        f"📊 ROI trade: {sign}{roi}%\n"
+        f"⏸ {asset} in pausa per 1h"
     )
     _send(text)
 
@@ -190,15 +242,16 @@ def notify_stop_loss(
     _send(text)
 
 
-def notify_scan_summary(scan_results: list[dict], next_scan: str) -> None:
+def notify_scan_summary(scan_results: list[dict], next_scan: str, strategy: str = "conservative") -> None:
     """
     Single message with the outcome of every asset in the current 4h scan.
     scan_results: list of dicts with keys:
         asset, signal, rsi, ema50_above, macd_bullish, volume_surge,
         close, reason, skipped (bool), skip_reason (str)
     """
+    strategy_icon = "🔥" if strategy == "aggressive" else "🛡"
     now = datetime.now(timezone.utc).strftime("%d/%m %H:%M")
-    lines = [f"🔍 Scan completato — {now} UTC", SEP]
+    lines = [f"🔍 Scan completato — {now} UTC  {strategy_icon}", SEP]
 
     for r in scan_results:
         asset = r["asset"]
@@ -215,11 +268,12 @@ def notify_scan_summary(scan_results: list[dict], next_scan: str) -> None:
             sig_icon = "⚪ HOLD"
 
         rsi = r["rsi"]
-        rsi_ok = 35 <= rsi <= 50
+        rsi_ok = r.get("rsi_ok", False)
+        ema_ref = r.get("ema_ref", "ema50").upper()
         lines.append(
             f"{sig_icon} — {asset}/EUR  €{r['close']:,.2f}\n"
             f"  RSI {rsi:.1f} {'✅' if rsi_ok else '❌'}  "
-            f"EMA50 {'✅' if r['ema50_above'] else '❌'}  "
+            f"{ema_ref} {'✅' if r['ema_above'] else '❌'}  "
             f"MACD {'✅' if r['macd_bullish'] else '❌'}  "
             f"Vol {'✅' if r['volume_surge'] else '❌'}"
         )
