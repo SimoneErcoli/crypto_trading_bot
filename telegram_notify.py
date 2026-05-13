@@ -29,7 +29,7 @@ def _send(text: str) -> None:
         logger.warning("Telegram not configured — skipping notification")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    payload = {"chat_id": chat_id, "text": text}
     try:
         resp = requests.post(url, json=payload, timeout=10)
         if not resp.ok:
