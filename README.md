@@ -152,6 +152,8 @@ and resumes monitoring. No positions are lost.
 
 ## Strategy overview
 
+### Asset allocations
+
 | Asset | Allocation | Min order |
 |-------|-----------|-----------|
 | BTC/EUR | 40% | 0.0001 BTC |
@@ -159,22 +161,74 @@ and resumes monitoring. No positions are lost.
 | SOL/EUR | 20% | 0.5 SOL |
 | XRP/EUR | 10% | 10 XRP |
 
-**Buy signal** (all conditions must be true):
+### Selecting a strategy
+
+Set `STRATEGIA` in `.env`:
+
+```
+STRATEGIA=conservative   # default — safer, fewer trades
+STRATEGIA=aggressive     # more entries, higher upside, tighter stops
+```
+
+### Parameter comparison
+
+| Parameter | Conservative | Aggressive |
+|-----------|-------------|------------|
+| RSI buy zone | 35–50 | 30–58 |
+| EMA reference | EMA(50) | EMA(20) — faster signal |
+| Volume threshold | >1.3× avg | >1.1× avg |
+| RSI sell | >72 | >78 — lets winners run |
+| Stop loss | −3% | −1.5% — cuts losses quicker |
+| Take profit 1 | +5% → close 50% | +3% → close 40% |
+| Take profit 2 | +10% → close 30% | +7% → close 35% |
+| Take profit 3 | — | +15% → close 25% |
+| Cooldown after close | 4h | 1h — re-enters faster |
+| Pause after N SL | 2 consecutive | 3 consecutive |
+| Position size | 1× allocation | 1.25× allocation |
+
+### Conservative strategy
+
+**Buy signal** (all must be true):
 - RSI(14) between 35 and 50
 - Close price above EMA(50)
 - MACD histogram > 0 or bullish crossover on last candle
 - Volume > 1.3× 20-period average
 
 **Exit rules:**
-- Stop loss at −3% (native Kraken order)
-- Take profit 1 at +5% → close 50%, move SL to breakeven
-- Take profit 2 at +10% → close remaining 30%
+- Stop loss at −3% (native Kraken order, active even if bot is offline)
+- TP1 at +5% → close 50%, move SL to breakeven
+- TP2 at +10% → close remaining 30%
 - Sell signal: RSI > 72 or bearish MACD divergence
 
 **Risk controls:**
 - Max 1 open position per asset
 - 4h cooldown after closing any position
 - After 2 consecutive stop-losses → 24h global pause
+
+### Aggressive strategy
+
+**Buy signal** (all must be true):
+- RSI(14) between 30 and 58
+- Close price above EMA(20)
+- MACD histogram > 0 or bullish crossover on last candle
+- Volume > 1.1× 20-period average
+
+**Exit rules:**
+- Stop loss at −1.5% (native Kraken order)
+- TP1 at +3% → close 40%, move SL to breakeven
+- TP2 at +7% → close 35%
+- TP3 at +15% → close remaining 25%
+- Sell signal: RSI > 78 or bearish MACD divergence
+
+**Risk controls:**
+- Max 1 open position per asset
+- 1h cooldown after closing any position
+- Position size is 1.25× the standard allocation (capped at available balance)
+- After 3 consecutive stop-losses → 24h global pause
+
+> **When to use aggressive:** trending markets with high volume and clear momentum.
+> The tighter stop loss (−1.5%) limits damage on false breakouts, while TP3 (+15%)
+> captures extended moves. Not recommended during sideways/choppy conditions.
 
 ---
 
