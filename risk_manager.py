@@ -14,24 +14,43 @@ from loguru import logger
 
 # ── Kraken minimum order sizes ────────────────────────────────────────────────
 MIN_ORDER_SIZE: dict[str, Decimal] = {
-    "BTC": Decimal("0.0001"),
-    "ETH": Decimal("0.01"),
-    "SOL": Decimal("0.5"),
-    "XRP": Decimal("10"),
+    "BTC":  Decimal("0.0001"),
+    "ETH":  Decimal("0.01"),
+    "SOL":  Decimal("0.5"),
+    "XRP":  Decimal("10"),
+    "ADA":  Decimal("5"),
+    "AVAX": Decimal("0.1"),
+    "DOT":  Decimal("0.5"),
+    "LINK": Decimal("0.2"),
+    "LTC":  Decimal("0.05"),
+    "ATOM": Decimal("0.5"),
 }
 
 ASSET_DECIMALS: dict[str, int] = {
-    "BTC": 6,
-    "ETH": 5,
-    "SOL": 4,
-    "XRP": 2,
+    "BTC":  6,
+    "ETH":  5,
+    "SOL":  4,
+    "XRP":  2,
+    "ADA":  2,
+    "AVAX": 4,
+    "DOT":  4,
+    "LINK": 4,
+    "LTC":  5,
+    "ATOM": 4,
 }
 
+# Must sum to 1.0 — tier-weighted by market cap
 ALLOCATIONS: dict[str, Decimal] = {
-    "BTC": Decimal("0.40"),
-    "ETH": Decimal("0.30"),
-    "SOL": Decimal("0.20"),
-    "XRP": Decimal("0.10"),
+    "BTC":  Decimal("0.20"),
+    "ETH":  Decimal("0.18"),
+    "SOL":  Decimal("0.12"),
+    "XRP":  Decimal("0.08"),
+    "ADA":  Decimal("0.08"),
+    "AVAX": Decimal("0.08"),
+    "DOT":  Decimal("0.08"),
+    "LINK": Decimal("0.07"),
+    "LTC":  Decimal("0.06"),
+    "ATOM": Decimal("0.05"),
 }
 
 PAUSE_FILE = Path(".pause_until")

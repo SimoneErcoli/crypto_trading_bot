@@ -16,18 +16,30 @@ from loguru import logger
 
 # Asset pair mapping: internal symbol → Kraken pair name
 KRAKEN_PAIRS: dict[str, str] = {
-    "BTC": "XXBTZEUR",
-    "ETH": "XETHZEUR",
-    "SOL": "SOLEUR",
-    "XRP": "XXRPZEUR",
+    "BTC":  "XXBTZEUR",
+    "ETH":  "XETHZEUR",
+    "SOL":  "SOLEUR",
+    "XRP":  "XXRPZEUR",
+    "ADA":  "ADAEUR",
+    "AVAX": "AVAXEUR",
+    "DOT":  "DOTEUR",
+    "LINK": "LINKEUR",
+    "LTC":  "XLTCZEUR",
+    "ATOM": "ATOMEUR",
 }
 
-# Kraken sell asset symbols (for balance lookup)
+# Kraken asset symbols (for balance lookup)
 KRAKEN_ASSET_SYMBOLS: dict[str, str] = {
-    "BTC": "XXBT",
-    "ETH": "XETH",
-    "SOL": "SOL",
-    "XRP": "XXRP",
+    "BTC":  "XXBT",
+    "ETH":  "XETH",
+    "SOL":  "SOL",
+    "XRP":  "XXRP",
+    "ADA":  "ADA",
+    "AVAX": "AVAX",
+    "DOT":  "DOT",
+    "LINK": "LINK",
+    "LTC":  "XLTC",
+    "ATOM": "ATOM",
 }
 
 RETRY_DELAYS = [30, 60, 120]

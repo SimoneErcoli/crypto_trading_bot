@@ -31,10 +31,22 @@ TRADES_FILE = Path("trades_history.json")
 LOG_FILE = Path("bot.log")
 PAUSE_FILE = Path(".pause_until")
 
-ASSETS = ["BTC", "ETH", "SOL", "XRP"]
-KRAKEN_PAIRS = {"BTC": "XXBTZEUR", "ETH": "XETHZEUR", "SOL": "SOLEUR", "XRP": "XXRPZEUR"}
-ALLOCATIONS = {"BTC": 0.40, "ETH": 0.30, "SOL": 0.20, "XRP": 0.10}
-ASSET_COLORS = {"BTC": "#F7931A", "ETH": "#627EEA", "SOL": "#9945FF", "XRP": "#346AA9"}
+ASSETS = ["BTC", "ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "ATOM"]
+KRAKEN_PAIRS = {
+    "BTC": "XXBTZEUR", "ETH": "XETHZEUR", "SOL": "SOLEUR",  "XRP": "XXRPZEUR",
+    "ADA": "ADAEUR",  "AVAX": "AVAXEUR",  "DOT": "DOTEUR",  "LINK": "LINKEUR",
+    "LTC": "XLTCZEUR", "ATOM": "ATOMEUR",
+}
+ALLOCATIONS = {
+    "BTC": 0.20, "ETH": 0.18, "SOL": 0.12, "XRP": 0.08,
+    "ADA": 0.08, "AVAX": 0.08, "DOT": 0.08, "LINK": 0.07,
+    "LTC": 0.06, "ATOM": 0.05,
+}
+ASSET_COLORS = {
+    "BTC": "#F7931A", "ETH": "#627EEA", "SOL": "#9945FF", "XRP": "#346AA9",
+    "ADA": "#0033AD", "AVAX": "#E84142", "DOT": "#E6007A", "LINK": "#2A5ADA",
+    "LTC": "#BFBBBB", "ATOM": "#6F4E7C",
+}
 
 AUTO_REFRESH_SECONDS = 30
 
@@ -222,7 +234,7 @@ def main():
     if not open_positions:
         st.info("Nessuna posizione aperta al momento.")
     else:
-        cols = st.columns(len(open_positions))
+        cols = st.columns(min(len(open_positions), 4))
         for col, (asset, pos) in zip(cols, open_positions.items()):
             with col:
                 entry = float(_dec(pos["entry_price"]))
@@ -282,42 +294,45 @@ def main():
 
     # ── Asset overview cards ───────────────────────────────────────────────────
     st.subheader("🔍 Stato asset")
-    acols = st.columns(len(ASSETS))
-    for col, asset in zip(acols, ASSETS):
-        with col:
-            pos = positions.get(asset)
-            active = pos.get("active", False) if pos else False
-            in_cooldown = False
-            if pos and not active:
-                close_time_str = pos.get("close_time")
-                if close_time_str:
-                    try:
-                        close_time = datetime.fromisoformat(close_time_str)
-                        if close_time.tzinfo is None:
-                            close_time = close_time.replace(tzinfo=timezone.utc)
-                        elapsed_h = (datetime.now(timezone.utc) - close_time).total_seconds() / 3600
-                        in_cooldown = elapsed_h < 4
-                    except Exception:
-                        pass
+    COLS_PER_ROW = 5
+    for row_start in range(0, len(ASSETS), COLS_PER_ROW):
+        row_assets = ASSETS[row_start:row_start + COLS_PER_ROW]
+        acols = st.columns(COLS_PER_ROW)
+        for col, asset in zip(acols, row_assets):
+            with col:
+                pos = positions.get(asset)
+                active = pos.get("active", False) if pos else False
+                in_cooldown = False
+                if pos and not active:
+                    close_time_str = pos.get("close_time")
+                    if close_time_str:
+                        try:
+                            close_time = datetime.fromisoformat(close_time_str)
+                            if close_time.tzinfo is None:
+                                close_time = close_time.replace(tzinfo=timezone.utc)
+                            elapsed_h = (datetime.now(timezone.utc) - close_time).total_seconds() / 3600
+                            in_cooldown = elapsed_h < 4
+                        except Exception:
+                            pass
 
-            current_price = prices.get(asset)
-            color = ASSET_COLORS.get(asset, "#888")
-            badge = f'<span class="asset-badge" style="background:{color}">{asset}</span>'
+                current_price = prices.get(asset)
+                color = ASSET_COLORS.get(asset, "#888")
+                badge = f'<span class="asset-badge" style="background:{color}">{asset}</span>'
 
-            if active:
-                state = "🟢 In posizione"
-            elif in_cooldown:
-                state = "⏸ Cooldown 4h"
-            else:
-                state = "👀 In ascolto"
+                if active:
+                    state = "🟢 In posizione"
+                elif in_cooldown:
+                    state = "⏸ Cooldown"
+                else:
+                    state = "👀 In ascolto"
 
-            price_str = f"€{current_price:,.2f}" if current_price else "—"
-            alloc_str = f"{ALLOCATIONS[asset]*100:.0f}% (€{capital_cfg * ALLOCATIONS[asset]:.0f})"
+                price_str = f"€{current_price:,.2f}" if current_price else "—"
+                alloc_str = f"{ALLOCATIONS[asset]*100:.0f}% (€{capital_cfg * ALLOCATIONS[asset]:.0f})"
 
-            st.markdown(badge, unsafe_allow_html=True)
-            st.markdown(f"**{state}**")
-            st.markdown(f"Prezzo: **{price_str}**")
-            st.markdown(f"Allocazione: {alloc_str}")
+                st.markdown(badge, unsafe_allow_html=True)
+                st.markdown(f"**{state}**")
+                st.markdown(f"Prezzo: **{price_str}**")
+                st.markdown(f"Allocazione: {alloc_str}")
 
     st.divider()
 

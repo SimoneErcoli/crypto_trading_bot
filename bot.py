@@ -45,7 +45,7 @@ from telegram_notify import (
     notify_error,
 )
 
-ASSETS = ["BTC", "ETH", "SOL", "XRP"]
+ASSETS = ["BTC", "ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "ATOM"]
 SCAN_INTERVAL_MINUTES = 240  # 4h
 
 # Track daily P&L (resets at midnight)
