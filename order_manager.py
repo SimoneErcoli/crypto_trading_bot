@@ -47,7 +47,10 @@ def _open_position_worker(asset: str, signal_result) -> None:
     try:
         cfg = rm.get_strategy_config()
         capital = rm.get_capital()
-        eur_balance = kc.get_eur_balance()
+        paper = rm.is_paper_trading()
+        # In paper mode the real balance is irrelevant (and may be €0);
+        # use the configured capital so position sizing works correctly.
+        eur_balance = capital if paper else kc.get_eur_balance()
         price = kc.get_ticker_price(asset)
 
         size_eur, size_asset = rm.calculate_position_size(asset, price, capital, eur_balance, cfg)
@@ -57,7 +60,7 @@ def _open_position_worker(asset: str, signal_result) -> None:
 
         sl, tp1, tp2, tp3 = rm.calculate_levels(price, cfg)
 
-        if rm.is_paper_trading():
+        if paper:
             order_id = f"PAPER-{asset}-{int(time.time())}"
             logger.info(f"[PAPER] Would place limit buy {size_asset} {asset} @ {price}")
         else:
@@ -78,9 +81,9 @@ def _open_position_worker(asset: str, signal_result) -> None:
 
         fill_price = _get_fill_price(order_id) or price
         actual_value = (fill_price * size_asset).quantize(Decimal("0.01"))
-        fee = (actual_value * kc.get_trade_fee(asset)).quantize(Decimal("0.01"))
+        fee = (actual_value * (Decimal("0.0016") if paper else kc.get_trade_fee(asset))).quantize(Decimal("0.01"))
 
-        if rm.is_paper_trading():
+        if paper:
             sl_order_id  = f"PAPER-SL-{asset}-{int(time.time())}"
             tp1_order_id = f"PAPER-TP1-{asset}-{int(time.time())}"
             tp2_order_id = f"PAPER-TP2-{asset}-{int(time.time())}"
