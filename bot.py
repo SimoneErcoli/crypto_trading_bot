@@ -43,6 +43,7 @@ from telegram_notify import (
     notify_daily_report,
     notify_scan_summary,
     notify_error,
+    notify_max_positions_reached,
 )
 
 ASSETS = ["BTC", "ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "ATOM"]
@@ -113,8 +114,19 @@ def _scan_asset(asset: str, cfg=None) -> dict:
     logger.info(f"{asset}: signal={result.signal} | {result.reason}")
 
     if result.signal == "BUY":
+        open_count = sum(1 for a in ASSETS if pm.has_active_position(a))
+        if open_count >= cfg.max_open_positions:
+            logger.info(f"{asset}: BUY signal but max positions reached ({open_count}/{cfg.max_open_positions})")
+            notify_max_positions_reached(asset, open_count, cfg.max_open_positions)
+            return {"asset": asset, "skipped": True,
+                    "skip_reason": f"max posizioni ({open_count}/{cfg.max_open_positions})"}
         logger.info(f"{asset}: BUY signal → opening position")
         om.open_position(asset, result)
+
+    elif result.signal == "SELL" and pm.has_active_position(asset):
+        logger.info(f"{asset}: SELL signal on open position → signal exit")
+        current_price = kc.get_ticker_price(asset)
+        om.close_position_on_signal(asset, current_price)
 
     return {
         "asset": asset,
@@ -126,6 +138,9 @@ def _scan_asset(asset: str, cfg=None) -> dict:
         "ema_ref": result.ema_ref,
         "macd_bullish": result.macd_bullish,
         "volume_surge": result.volume_surge,
+        "adx": result.adx,
+        "adx_ok": result.adx >= cfg.adx_min,
+        "ema200_above": result.ema200_above,
         "close": result.close,
         "reason": result.reason,
     }

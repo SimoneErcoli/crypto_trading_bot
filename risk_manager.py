@@ -65,20 +65,29 @@ class StrategyConfig:
     rsi_buy_low: int
     rsi_buy_high: int
     rsi_sell: int
-    ema_ref: str                    # "ema20" | "ema50"
+    ema_ref: str                        # "ema20" | "ema50"
     volume_multiplier: float
+    # Trend filters
+    adx_min: int                        # minimum ADX to confirm trend (0 = disabled)
+    use_ema200_filter: bool             # only long when close > EMA200
     # Risk/reward
-    sl_pct: Decimal
+    sl_pct: Decimal                     # fallback SL if ATR unavailable
+    atr_sl_multiplier: Decimal          # SL = entry - multiplier * ATR(14)
     tp1_pct: Decimal
-    tp1_close_pct: Decimal          # fraction of position closed at TP1
+    tp1_close_pct: Decimal
     tp2_pct: Decimal
     tp2_close_pct: Decimal
-    tp3_pct: Optional[Decimal]      # None = no TP3
+    tp3_pct: Optional[Decimal]
     tp3_close_pct: Optional[Decimal]
+    # Exit improvements
+    trailing_stop_pct: Decimal          # trail SL at X% below high after TP1
+    max_position_hours: int             # close flat positions after N hours (0 = disabled)
+    flat_threshold_pct: Decimal         # |pnl| < this % = "flat" for time exit
     # Behaviour
     cooldown_hours: int
-    max_consecutive_losses: int     # losses before global pause
-    size_multiplier: Decimal        # 1.0 = normal allocation
+    max_consecutive_losses: int
+    max_open_positions: int             # global concurrent position limit
+    size_multiplier: Decimal
 
 
 CONSERVATIVE = StrategyConfig(
@@ -88,15 +97,22 @@ CONSERVATIVE = StrategyConfig(
     rsi_sell=72,
     ema_ref="ema50",
     volume_multiplier=1.3,
+    adx_min=20,
+    use_ema200_filter=True,
     sl_pct=Decimal("0.03"),
+    atr_sl_multiplier=Decimal("2.0"),
     tp1_pct=Decimal("0.05"),
     tp1_close_pct=Decimal("0.50"),
     tp2_pct=Decimal("0.10"),
     tp2_close_pct=Decimal("0.30"),
     tp3_pct=None,
     tp3_close_pct=None,
+    trailing_stop_pct=Decimal("0.03"),
+    max_position_hours=96,
+    flat_threshold_pct=Decimal("0.005"),
     cooldown_hours=4,
     max_consecutive_losses=2,
+    max_open_positions=4,
     size_multiplier=Decimal("1.0"),
 )
 
@@ -107,15 +123,22 @@ AGGRESSIVE = StrategyConfig(
     rsi_sell=78,
     ema_ref="ema20",
     volume_multiplier=1.1,
+    adx_min=15,
+    use_ema200_filter=False,
     sl_pct=Decimal("0.015"),
+    atr_sl_multiplier=Decimal("1.5"),
     tp1_pct=Decimal("0.03"),
     tp1_close_pct=Decimal("0.40"),
     tp2_pct=Decimal("0.07"),
     tp2_close_pct=Decimal("0.35"),
     tp3_pct=Decimal("0.15"),
     tp3_close_pct=Decimal("0.25"),
+    trailing_stop_pct=Decimal("0.02"),
+    max_position_hours=48,
+    flat_threshold_pct=Decimal("0.005"),
     cooldown_hours=1,
     max_consecutive_losses=3,
+    max_open_positions=6,
     size_multiplier=Decimal("1.25"),
 )
 
@@ -199,12 +222,23 @@ def calculate_position_size(
 def calculate_levels(
     entry_price: Decimal,
     cfg: Optional[StrategyConfig] = None,
+    atr: Optional[float] = None,
 ) -> tuple[Decimal, Decimal, Decimal, Optional[Decimal]]:
-    """Returns (stop_loss, tp1, tp2, tp3_or_None)."""
+    """Returns (stop_loss, tp1, tp2, tp3_or_None).
+    Uses ATR-based SL when atr is provided, falls back to percentage.
+    """
     if cfg is None:
         cfg = get_strategy_config()
 
-    sl  = (entry_price * (Decimal("1") - cfg.sl_pct)).quantize(Decimal("0.01"))
+    if atr and atr > 0:
+        atr_dec = Decimal(str(round(atr, 4)))
+        sl = (entry_price - cfg.atr_sl_multiplier * atr_dec).quantize(Decimal("0.01"))
+        # Safety cap: ATR-SL cannot be worse than 2× the percentage SL
+        max_sl_drop = entry_price * cfg.sl_pct * Decimal("2")
+        sl = max(sl, entry_price - max_sl_drop)
+    else:
+        sl = (entry_price * (Decimal("1") - cfg.sl_pct)).quantize(Decimal("0.01"))
+
     tp1 = (entry_price * (Decimal("1") + cfg.tp1_pct)).quantize(Decimal("0.01"))
     tp2 = (entry_price * (Decimal("1") + cfg.tp2_pct)).quantize(Decimal("0.01"))
     tp3 = (

@@ -177,6 +177,7 @@ def build_new_position(
         "tp1_hit": False,
         "tp2_hit": False,
         "tp3_hit": False,
+        "trailing_high": None,      # set after TP1 for trailing stop
         "consecutive_losses": 0,
         "close_time": None,
     }

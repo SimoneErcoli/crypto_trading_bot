@@ -99,11 +99,13 @@ def notify_position_opened(
     volume_surge: bool,
     fee: Decimal,
     tp3: Optional[Decimal] = None,
+    atr: Optional[float] = None,
 ) -> None:
-    sl_pct  = f"-{int(cfg.sl_pct * 100)}%"
+    sl_pct  = f"-{float(cfg.sl_pct)*100:.1f}%"
     tp1_pct = f"+{int(cfg.tp1_pct * 100)}%"
     tp2_pct = f"+{int(cfg.tp2_pct * 100)}%"
     strategy_icon = "🔥" if cfg.name == "aggressive" else "🛡"
+    sl_type = f"ATR×{cfg.atr_sl_multiplier}" if atr else "fisso"
 
     lines = [
         f"🟢 POSIZIONE APERTA — {asset}/EUR  {strategy_icon}",
@@ -112,13 +114,13 @@ def notify_position_opened(
         f"💰 Prezzo entrata: €{entry_price}",
         f"📦 Quantità: {size_asset} {asset}",
         f"💵 Valore: €{size_eur}",
-        f"🛡 Stop Loss: €{sl} ({sl_pct}) → ordine piazzato",
+        f"🛡 Stop Loss: €{sl} ({sl_pct}, {sl_type})",
         f"🎯 TP1: €{tp1} ({tp1_pct}) → chiude {int(cfg.tp1_close_pct*100)}%",
         f"🎯 TP2: €{tp2} ({tp2_pct}) → chiude {int(cfg.tp2_close_pct*100)}%",
     ]
     if tp3 and cfg.tp3_pct:
-        tp3_pct = f"+{int(cfg.tp3_pct * 100)}%"
-        lines.append(f"🚀 TP3: €{tp3} ({tp3_pct}) → chiude {int(cfg.tp3_close_pct*100)}%")
+        lines.append(f"🚀 TP3: €{tp3} (+{int(cfg.tp3_pct*100)}%) → chiude {int(cfg.tp3_close_pct*100)}%")
+    lines.append(f"📈 Trailing stop: {float(cfg.trailing_stop_pct)*100:.0f}% dopo TP1")
 
     ema_label = ema_ref.upper()
     lines += [
@@ -154,19 +156,94 @@ def notify_tp1_hit(
     remaining_size: Decimal,
     remaining_value: Decimal,
     tp3: Optional[Decimal] = None,
+    trailing_pct: Optional[Decimal] = None,
 ) -> None:
     sign = "+" if profit >= 0 else ""
     next_target = f"🚀 TP3 ancora aperto a €{tp3}" if tp3 else f"🎯 TP2 ancora aperto a €{tp2}"
+    trailing_line = f"📈 Trailing stop attivo: {float(trailing_pct)*100:.0f}% sotto il massimo" if trailing_pct else ""
+    lines = [
+        f"🟡 TP1 RAGGIUNTO — {asset}/EUR",
+        SEP,
+        f"✅ Venduto parziale a €{tp1_price}",
+        f"💵 Incassato: €{tp1_value}",
+        f"📈 Profitto netto (fee incluse): {sign}€{profit}",
+        f"📍 SL spostato al breakeven: €{breakeven}",
+        f"🎯 TP2 ancora aperto a €{tp2}",
+        next_target,
+    ]
+    if trailing_line:
+        lines.append(trailing_line)
+    lines.append(f"Rimane: {remaining_size} {asset} (€{remaining_value})")
+    _send("\n".join(lines))
+
+
+def notify_trailing_stop_exit(
+    asset: str,
+    exit_price: Decimal,
+    trailing_high: Decimal,
+    trailing_sl: Decimal,
+    profit: Decimal,
+) -> None:
+    sign = "+" if profit >= 0 else ""
     text = (
-        f"🟡 TP1 RAGGIUNTO — {asset}/EUR\n"
+        f"📉 TRAILING STOP — {asset}/EUR\n"
         f"{SEP}\n"
-        f"✅ Venduto parziale a €{tp1_price}\n"
-        f"💵 Incassato: €{tp1_value}\n"
-        f"📈 Profitto netto (fee incluse): {sign}€{profit}\n"
-        f"📍 SL spostato al breakeven: €{breakeven}\n"
-        f"🎯 TP2 ancora aperto a €{tp2}\n"
-        f"{next_target}\n"
-        f"Rimane: {remaining_size} {asset} (€{remaining_value})"
+        f"Prezzo sceso sotto il trailing SL\n"
+        f"📊 Massimo raggiunto: €{trailing_high}\n"
+        f"🛡 Trailing SL: €{trailing_sl}\n"
+        f"💰 Uscita a: €{exit_price}\n"
+        f"💵 Profitto netto: {sign}€{profit}\n"
+        f"✅ Profitto protetto dal trailing stop"
+    )
+    _send(text)
+
+
+def notify_time_exit(
+    asset: str,
+    exit_price: Decimal,
+    pnl: Decimal,
+    hours_open: int,
+    max_hours: int,
+) -> None:
+    sign = "+" if pnl >= 0 else ""
+    text = (
+        f"⏱ TIME EXIT — {asset}/EUR\n"
+        f"{SEP}\n"
+        f"Posizione piatta chiusa per scadenza\n"
+        f"Aperta da: {hours_open}h (max {max_hours}h)\n"
+        f"💰 Uscita a: €{exit_price}\n"
+        f"💵 P&L: {sign}€{pnl}\n"
+        f"Capitale liberato per nuove opportunità."
+    )
+    _send(text)
+
+
+def notify_signal_exit(
+    asset: str,
+    exit_price: Decimal,
+    pnl: Decimal,
+) -> None:
+    sign = "+" if pnl >= 0 else ""
+    emoji = "✅" if pnl >= 0 else "⚠️"
+    text = (
+        f"{emoji} USCITA DA SEGNALE — {asset}/EUR\n"
+        f"{SEP}\n"
+        f"Segnale SELL rilevato (RSI/MACD)\n"
+        f"💰 Uscita a: €{exit_price}\n"
+        f"💵 P&L: {sign}€{pnl}"
+    )
+    _send(text)
+
+
+def notify_max_positions_reached(
+    asset: str, open_count: int, max_count: int
+) -> None:
+    text = (
+        f"⏸ MAX POSIZIONI — {asset}/EUR\n"
+        f"{SEP}\n"
+        f"Segnale BUY ignorato.\n"
+        f"Posizioni aperte: {open_count}/{max_count}\n"
+        f"Il bot ricontrollerà al prossimo scan."
     )
     _send(text)
 
@@ -268,14 +345,19 @@ def notify_scan_summary(scan_results: list[dict], next_scan: str, strategy: str 
             sig_icon = "⚪ HOLD"
 
         rsi = r["rsi"]
-        rsi_ok = r.get("rsi_ok", False)
-        ema_ref = r.get("ema_ref", "ema50").upper()
+        rsi_ok   = r.get("rsi_ok", False)
+        adx_ok   = r.get("adx_ok", False)
+        adx_val  = r.get("adx", 0)
+        ema200   = r.get("ema200_above", False)
+        ema_ref  = r.get("ema_ref", "ema50").upper()
         lines.append(
             f"{sig_icon} — {asset}/EUR  €{r['close']:,.2f}\n"
             f"  RSI {rsi:.1f} {'✅' if rsi_ok else '❌'}  "
             f"{ema_ref} {'✅' if r['ema_above'] else '❌'}  "
             f"MACD {'✅' if r['macd_bullish'] else '❌'}  "
-            f"Vol {'✅' if r['volume_surge'] else '❌'}"
+            f"Vol {'✅' if r['volume_surge'] else '❌'}  "
+            f"ADX {adx_val:.0f} {'✅' if adx_ok else '❌'}  "
+            f"EMA200 {'✅' if ema200 else '❌'}"
         )
         if signal == "HOLD":
             lines.append(f"  ↳ {r['reason']}")
