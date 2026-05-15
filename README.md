@@ -101,6 +101,9 @@ python bot.py
 Il bot si allinea alla prossima candela 4h (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC),
 poi ripete ogni 4 ore. I log vengono scritti su `bot.log` (rotazione giornaliera, 7 giorni).
 
+All'avvio invia su Telegram un messaggio di conferma con strategia, capitale e orario del prossimo scan.
+Il report giornaliero viene inviato alle 20:00 UTC.
+
 ---
 
 ## 6. Dashboard web
@@ -190,7 +193,9 @@ Ad ogni apertura di posizione il bot piazza su Kraken:
 
 Al riavvio il bot rilegge `positions.json`, riconnette gli ordini aperti e riprende il monitoring. Nessuna posizione va persa.
 
-> Per chiudere manualmente: Kraken → Ordini aperti → Cancella/Chiudi.
+> In paper trading non esistono ordini reali su Kraken — fermare il bot non ha conseguenze sui fondi.
+
+> Per chiudere manualmente in live: Kraken → Ordini aperti → Cancella/Chiudi.
 
 ---
 
@@ -212,6 +217,23 @@ Al riavvio il bot rilegge `positions.json`, riconnette gli ordini aperti e ripre
 | ATOM/EUR | 5% | 0.5 ATOM | ATOMEUR |
 
 Le allocazioni sono pesate per capitalizzazione di mercato e sommano al 100%.
+
+### Capitale minimo consigliato
+
+Con capitali bassi alcuni asset potrebbero non raggiungere il minimo d'ordine Kraken.
+Il bot gestisce questo caso automaticamente: se la size calcolata è sotto il minimo ma
+il saldo disponibile lo copre, **scala al minimo** invece di saltare il trade.
+
+Esempio con €100 e strategia aggressive (size×1.25):
+
+| Asset | Allocazione | Size calcolata | Min Kraken | Comportamento |
+|-------|------------|---------------|------------|---------------|
+| XRP | 8% → €10 | 7.9 XRP | 10 XRP | scalato a 10 XRP (€12.60) |
+| LTC | 6% → €7.50 | 0.15 LTC | 0.05 LTC | ok |
+| ADA | 8% → €10 | 43 ADA | 5 ADA | ok |
+
+> Con €100 il bot è pienamente operativo su tutti e 10 gli asset.
+> Per eliminare qualsiasi scaling, usa un capitale ≥ €200.
 
 ---
 
@@ -325,24 +347,45 @@ STRATEGIA=aggressive
 ### Ciclo di vita di una posizione
 
 ```
-BUY signal
-    └─▶ Ordine limit buy piazzato
-            └─▶ Attesa esecuzione (max 30 min)
-                    ├─▶ [scaduto] → cancellato, retry al prossimo scan
-                    └─▶ [eseguito] → SL nativo + TP1/TP2(/TP3) su Kraken
-                                          │
-                               ┌──────────┼──────────┐
-                             TP1        TP2/3        SL
-                          chiude 40-50%  chiude tot  chiude tot
-                          trailing on   posizione    posizione
-                               │         chiusa       chiusa
-                          prezzo sale
-                               │
-                          trailing SL aggiornato
-                               │
-                          prezzo scende sotto trailing SL
-                               └─▶ chiusura con profitto
+BUY signal (RSI + EMA + MACD + Volume + ADX + EMA200)
+    │
+    └─▶ Ordine limit buy piazzato (prezzo maker)
+            │
+            └─▶ Polling ogni 60s (max 30 min)
+                    │
+                    ├─▶ [scaduto] ──────────────────▶ cancellato, retry al prossimo scan
+                    │
+                    └─▶ [eseguito]
+                            │
+                            ├─▶ SL nativo Kraken  (ATR×moltiplicatore)
+                            ├─▶ TP1 limit sell
+                            ├─▶ TP2 limit sell
+                            └─▶ TP3 limit sell  (solo aggressive)
+                                    │
+                    ┌───────────────┼───────────────────┬──────────────┐
+                    │               │                   │              │
+                  TP1 hit        SL hit           SELL signal     Time exit
+               chiude 40-50%   chiude tutto      (RSI/MACD)      (piatta >N h)
+               SL→breakeven    posizione chiusa  chiude tutto     chiude tutto
+               trailing on          │                  │              │
+                    │          consecutive SL?         │              │
+                    │          ≥ soglia? → pausa 24h   │              │
+                    │                                  │              │
+               prezzo sale                             │              │
+                    │                                  │              │
+               trailing_high aggiornato                │              │
+                    │                                  │              │
+               prezzo < trailing_SL                    │              │
+                    └─▶ trailing stop exit ────────────┘              │
+                        chiude con profitto                           │
+                                                                      │
+                            TP2 hit (e TP3 se present)                │
+                            chiude rimanente                          │
+                            posizione chiusa ─────────────────────────┘
 ```
+
+**In paper trading** gli ordini sono simulati localmente senza chiamate API Kraken.
+I fill sono istantanei, le uscite TP/SL vengono verificate sul prezzo live ogni 60 secondi.
 
 ### File di stato
 
