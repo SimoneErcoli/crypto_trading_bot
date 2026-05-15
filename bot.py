@@ -98,7 +98,7 @@ def _scan_asset(asset: str, cfg=None) -> dict:
     # Skip if already in position
     if pm.has_active_position(asset):
         logger.info(f"{asset}: position already open — checking exit conditions")
-        _check_exit_for_open_position(asset)
+        _check_exit_for_open_position(asset, cfg)
         return {"asset": asset, "skipped": True, "skip_reason": "posizione aperta"}
 
     # Skip if in cooldown after close
@@ -146,11 +146,11 @@ def _scan_asset(asset: str, cfg=None) -> dict:
     }
 
 
-def _check_exit_for_open_position(asset: str) -> None:
+def _check_exit_for_open_position(asset: str, cfg) -> None:
     """
-    Supplementary exit check using the signal engine.
-    The primary exits (SL/TP) are handled by Kraken native orders and
-    the order_manager exit monitor thread.
+    Supplementary price-level exit check for assets with open positions.
+    Used as a fallback when the exit monitor thread is not running
+    (e.g. first scan after bot restart).
     """
     pos = pm.get_position(asset)
     if not pos:
@@ -159,7 +159,18 @@ def _check_exit_for_open_position(asset: str) -> None:
     should_exit, reason = st.check_exit_conditions(asset, price, pos)
     if should_exit:
         logger.info(f"{asset}: supplementary exit triggered ({reason}) at {price}")
-        # The exit monitor thread should have already acted; log for audit trail.
+
+
+def _resume_exit_monitors() -> None:
+    """
+    Called once on startup. For each asset that has an active position in
+    positions.json (left over from a previous run), restart the exit monitor
+    thread so TP/SL/trailing/time-exit logic keeps running.
+    """
+    for asset in ASSETS:
+        if pm.has_active_position(asset):
+            logger.info(f"{asset}: restarting exit monitor for pre-existing position")
+            om._monitor_exit(asset)
 
 
 def daily_report() -> None:
@@ -232,6 +243,9 @@ def main() -> None:
     except Exception as exc:
         logger.warning(f"Could not fetch initial balance: {exc}")
         _session_start_capital = capital
+
+    # Restart exit monitors for positions that survived a previous run
+    _resume_exit_monitors()
 
     next_scan = _next_scan_time()
     notify_startup(
