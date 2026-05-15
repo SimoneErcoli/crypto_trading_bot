@@ -212,7 +212,12 @@ def calculate_position_size(
 
     min_size = MIN_ORDER_SIZE[asset]
     if size_asset < min_size:
-        logger.warning(f"{asset}: computed size {size_asset} < minimum {min_size}. Skipping.")
+        min_cost = (min_size * price).quantize(Decimal("0.01"))
+        if min_cost <= available_balance:
+            # Scale up to minimum order size if balance allows
+            logger.info(f"{asset}: size {size_asset} below minimum {min_size}, scaling up to minimum (€{min_cost})")
+            return min_cost, min_size
+        logger.warning(f"{asset}: computed size {size_asset} < minimum {min_size} and balance €{available_balance} insufficient for minimum €{min_cost}. Skipping.")
         return Decimal("0"), Decimal("0")
 
     size_eur = (size_asset * price).quantize(Decimal("0.01"))
