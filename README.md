@@ -1,49 +1,90 @@
 # Kraken Swing Trading Bot
 
-Autonomous Python bot that runs a 4h swing trading strategy on Kraken with real orders
-and Telegram notifications, 24/7 with no human intervention required.
+Bot Python autonomo che esegue una strategia di swing trading su Kraken con ordini reali,
+notifiche Telegram e monitoring via dashboard web. Gira 24/7 senza intervento umano.
 
 ---
 
-## 1. Create the Telegram Bot
+## Indice
 
-1. Open Telegram and search for **@BotFather**.
-2. Send `/newbot` and follow the prompts — choose a name and a username.
-3. BotFather replies with your **Bot Token** (format: `123456789:AABBCCDDee...`).
-4. Copy it to `TELEGRAM_BOT_TOKEN` in `.env`.
-
-**Get your Chat ID:**
-1. Start a conversation with **@userinfobot** on Telegram.
-2. It replies with your numeric user ID — copy it to `TELEGRAM_CHAT_ID` in `.env`.
-3. Send any message to your new bot so it can reach you first.
-
----
-
-## 2. Generate Kraken API Keys
-
-1. Log in at [kraken.com](https://www.kraken.com) → Account → Security → API.
-2. Click **Create API Key**.
-3. Enable **only the `Trade` permission** — never enable `Withdraw` or `Funding`.
-4. Copy the **API Key** and **Private Key (Secret)** to `.env`.
-
-> **Security tip:** restrict the key to your server IP address in the Kraken API settings.
+1. [Setup Telegram](#1-setup-telegram)
+2. [API Key Kraken](#2-api-key-kraken)
+3. [Configurazione](#3-configurazione)
+4. [Installazione](#4-installazione)
+5. [Avvio](#5-avvio)
+6. [Dashboard web](#6-dashboard-web)
+7. [Linux systemd](#7-linux-systemd)
+8. [Windows Task Scheduler](#8-windows-task-scheduler)
+9. [Se il bot si ferma](#9-se-il-bot-si-ferma)
+10. [Asset monitorati](#10-asset-monitorati)
+11. [Strategia Conservative](#11-strategia-conservative)
+12. [Strategia Aggressive](#12-strategia-aggressive)
+13. [Confronto strategie](#13-confronto-strategie)
+14. [Gestione posizioni](#14-gestione-posizioni)
+15. [Struttura file](#15-struttura-file)
 
 ---
 
-## 3. Configure the bot
+## 1. Setup Telegram
+
+**Creare il bot:**
+1. Apri Telegram e cerca **@BotFather**
+2. Invia `/newbot` e scegli nome e username
+3. BotFather risponde con il **Bot Token** (formato: `123456789:AABBCCDDee...`)
+4. Copia il token in `TELEGRAM_BOT_TOKEN` nel file `.env`
+
+**Ottenere il Chat ID:**
+1. Cerca **@userinfobot** su Telegram
+2. Risponde con il tuo ID numerico — copialo in `TELEGRAM_CHAT_ID`
+3. Invia almeno un messaggio al tuo nuovo bot per abilitare le notifiche
+
+---
+
+## 2. API Key Kraken
+
+1. Accedi su [kraken.com](https://www.kraken.com) → Account → Security → API
+2. Clicca **Create API Key**
+3. Abilita **solo il permesso `Trade`** — non abilitare mai `Withdraw` o `Funding`
+4. Copia **API Key** e **Private Key (Secret)** nel file `.env`
+
+> **Sicurezza:** limita la chiave al solo indirizzo IP del tuo server nelle impostazioni API di Kraken.
+
+---
+
+## 3. Configurazione
 
 ```bash
 cp .env.example .env
-# Edit .env with your credentials and settings
+# Modifica .env con le tue credenziali
 ```
 
-Start with `PAPER_TRADING=true` to verify everything works before going live.
+Tutte le opzioni disponibili:
+
+```env
+# Kraken API
+KRAKEN_API_KEY=...
+KRAKEN_API_SECRET=...
+
+# Telegram
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+
+# Capitale e rischio
+CAPITALE_TOTALE=100          # euro da utilizzare
+RISCHIO_PER_TRADE=0.015
+
+# Modalità
+PAPER_TRADING=true           # true = simulazione, false = ordini reali
+STRATEGIA=conservative       # conservative | aggressive
+```
+
+> Inizia sempre con `PAPER_TRADING=true` per verificare il funzionamento prima di andare live.
 
 ---
 
-## 4. Install dependencies
+## 4. Installazione
 
-Requires **Python 3.11+**.
+Richiede **Python 3.11+**.
 
 ```bash
 pip install -r requirements.txt
@@ -51,28 +92,40 @@ pip install -r requirements.txt
 
 ---
 
-## 5. Run the bot
+## 5. Avvio
 
 ```bash
 python bot.py
 ```
 
-The bot aligns itself to the next 4h candle boundary (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
-before running the first scan, then repeats every 4 hours.
-
-Logs are written to `bot.log` (daily rotation, 7-day retention).
+Il bot si allinea alla prossima candela 4h (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC),
+poi ripete ogni 4 ore. I log vengono scritti su `bot.log` (rotazione giornaliera, 7 giorni).
 
 ---
 
-## 6. Run as a background service on Linux (systemd)
+## 6. Dashboard web
 
-Create the service file:
+```bash
+streamlit run dashboard.py
+```
+
+Apre `http://localhost:8501` con:
+- Stato bot (live/paper/pausa) e strategia attiva
+- KPI: capitale, P&L totale, P&L oggi, win rate
+- Posizioni aperte con prezzi live e barra SL→TP2
+- Stato di ogni asset (in posizione / cooldown / in ascolto)
+- Storico trade con grafico P&L cumulativo
+- Log in tempo reale con color-coding per livello
+
+Auto-refresh ogni 30 secondi. Non richiede API key per funzionare.
+
+---
+
+## 7. Linux systemd
 
 ```bash
 sudo nano /etc/systemd/system/kraken-bot.service
 ```
-
-Paste this content (adjust paths to your actual installation):
 
 ```ini
 [Unit]
@@ -95,34 +148,29 @@ EnvironmentFile=/home/YOUR_LINUX_USER/kraken-bot/.env
 WantedBy=multi-user.target
 ```
 
-Enable and start:
-
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable kraken-bot
 sudo systemctl start kraken-bot
 
-# Check status
-sudo systemctl status kraken-bot
-
-# Watch live logs
-sudo journalctl -u kraken-bot -f
+sudo systemctl status kraken-bot   # controlla stato
+sudo journalctl -u kraken-bot -f   # log in tempo reale
 ```
 
 ---
 
-## 7. Run on Windows with Task Scheduler
+## 8. Windows Task Scheduler
 
-1. Open **Task Scheduler** → "Create Basic Task".
-2. Trigger: **At system startup** (or daily at a fixed time).
-3. Action: **Start a program**
-   - Program: `C:\Python311\python.exe`
-   - Arguments: `C:\path\to\kraken-bot\bot.py`
-   - Start in: `C:\path\to\kraken-bot`
-4. Check "Run whether user is logged on or not".
-5. Save and enter your Windows credentials when prompted.
+1. Apri **Utilità di pianificazione** → "Crea attività di base"
+2. Trigger: **All'avvio del sistema**
+3. Azione: **Avvia programma**
+   - Programma: `C:\Python311\python.exe`
+   - Argomenti: `C:\path\to\kraken-bot\bot.py`
+   - Inizia in: `C:\path\to\kraken-bot`
+4. Spunta "Esegui che l'utente sia connesso o meno"
+5. Salva e inserisci le credenziali Windows
 
-Alternatively, create a `.bat` launcher:
+In alternativa crea un file `start.bat`:
 
 ```bat
 @echo off
@@ -130,123 +178,219 @@ cd /d C:\path\to\kraken-bot
 python bot.py >> bot_console.log 2>&1
 ```
 
-And schedule the `.bat` file in Task Scheduler.
+---
+
+## 9. Se il bot si ferma
+
+**I fondi sono protetti.**
+
+Ad ogni apertura di posizione il bot piazza su Kraken:
+- **Stop-loss nativo Kraken** — risiede sui server Kraken, non nel bot. Scatta automaticamente anche se il bot è offline.
+- **Ordini take-profit limit** — anch'essi su Kraken, indipendenti dal bot.
+
+Al riavvio il bot rilegge `positions.json`, riconnette gli ordini aperti e riprende il monitoring. Nessuna posizione va persa.
+
+> Per chiudere manualmente: Kraken → Ordini aperti → Cancella/Chiudi.
 
 ---
 
-## 8. What happens if the bot stops?
+## 10. Asset monitorati
 
-**Your funds are protected.**
+10 asset su coppie EUR, selezionati per liquidità e volatilità:
 
-Every time the bot opens a position it places:
-- A **native Kraken stop-loss order** — this is stored on Kraken's servers, not in the bot.
-  If the bot goes offline, this order still executes automatically when the price hits your stop.
-- **Take-profit limit orders** — also stored on Kraken, fire independently of the bot.
+| Asset | Allocazione | Min ordine | Pair Kraken |
+|-------|------------|-----------|-------------|
+| BTC/EUR | 20% | 0.0001 BTC | XXBTZEUR |
+| ETH/EUR | 18% | 0.01 ETH | XETHZEUR |
+| SOL/EUR | 12% | 0.5 SOL | SOLEUR |
+| XRP/EUR | 8% | 10 XRP | XXRPZEUR |
+| ADA/EUR | 8% | 5 ADA | ADAEUR |
+| AVAX/EUR | 8% | 0.1 AVAX | AVAXEUR |
+| DOT/EUR | 8% | 0.5 DOT | DOTEUR |
+| LINK/EUR | 7% | 0.2 LINK | LINKEUR |
+| LTC/EUR | 6% | 0.05 LTC | XLTCZEUR |
+| ATOM/EUR | 5% | 0.5 ATOM | ATOMEUR |
 
-When the bot restarts it re-reads `positions.json`, reconnects to open orders,
-and resumes monitoring. No positions are lost.
-
-> If you want to manually close everything, go to Kraken → Open Orders and cancel/close there.
+Le allocazioni sono pesate per capitalizzazione di mercato e sommano al 100%.
 
 ---
 
-## Strategy overview
+## 11. Strategia Conservative
 
-### Asset allocations
+Impostazione predefinita. Privilegia segnali forti e riduce i falsi positivi.
 
-| Asset | Allocation | Min order |
-|-------|-----------|-----------|
-| BTC/EUR | 40% | 0.0001 BTC |
-| ETH/EUR | 30% | 0.01 ETH |
-| SOL/EUR | 20% | 0.5 SOL |
-| XRP/EUR | 10% | 10 XRP |
+### Segnale d'entrata (tutti devono essere veri)
 
-### Selecting a strategy
+| Condizione | Valore |
+|-----------|--------|
+| RSI(14) | tra 35 e 50 (zona di accumulo) |
+| EMA(50) | prezzo sopra la media mobile veloce |
+| EMA(200) | prezzo sopra la media mobile lenta (trend rialzista) |
+| MACD | istogramma > 0 oppure crossover bullish sull'ultima candela |
+| Volume | > 1.3× media 20 periodi |
+| ADX(14) | > 20 (mercato in trend, non laterale) |
 
-Set `STRATEGIA` in `.env`:
+### Uscite
 
-```
-STRATEGIA=conservative   # default — safer, fewer trades
-STRATEGIA=aggressive     # more entries, higher upside, tighter stops
-```
+| Evento | Azione |
+|--------|--------|
+| Stop loss ATR | entry − 2 × ATR(14), max −6% di cap |
+| TP1 +5% | chiude 50%, SL spostato al breakeven |
+| TP1 → trailing stop | SL segue il prezzo a −3% dal massimo |
+| TP2 +10% | chiude 30%, posizione chiusa |
+| RSI > 72 | segnale SELL → chiusura immediata |
+| Divergenza MACD bearish | segnale SELL → chiusura immediata |
+| Posizione piatta > 96h | time exit, capitale liberato |
 
-### Parameter comparison
+### Controlli di rischio
 
-| Parameter | Conservative | Aggressive |
+- Max 4 posizioni aperte simultanee
+- Cooldown 4h dopo ogni chiusura
+- Pausa globale 24h dopo 2 stop-loss consecutivi
+
+---
+
+## 12. Strategia Aggressive
+
+Più opportunità di entrata, stop più stretti, tre livelli di take profit.
+Indicata per mercati in trend con alto volume.
+
+### Segnale d'entrata (tutti devono essere veri)
+
+| Condizione | Valore |
+|-----------|--------|
+| RSI(14) | tra 30 e 58 (range più ampio) |
+| EMA(20) | prezzo sopra la media mobile più reattiva |
+| EMA(200) | filtro disabilitato (può operare contro il macro trend) |
+| MACD | istogramma > 0 oppure crossover bullish |
+| Volume | > 1.1× media 20 periodi |
+| ADX(14) | > 15 |
+
+### Uscite
+
+| Evento | Azione |
+|--------|--------|
+| Stop loss ATR | entry − 1.5 × ATR(14), max −3% di cap |
+| TP1 +3% | chiude 40%, SL spostato al breakeven |
+| TP1 → trailing stop | SL segue il prezzo a −2% dal massimo |
+| TP2 +7% | chiude 35% |
+| TP3 +15% | chiude 25% restanti, posizione chiusa |
+| RSI > 78 | segnale SELL → chiusura immediata |
+| Divergenza MACD bearish | segnale SELL → chiusura immediata |
+| Posizione piatta > 48h | time exit, capitale liberato |
+
+### Controlli di rischio
+
+- Max 6 posizioni aperte simultanee
+- Size 1.25× l'allocazione standard (cappata al saldo disponibile)
+- Cooldown 1h dopo ogni chiusura
+- Pausa globale 24h dopo 3 stop-loss consecutivi
+
+> **Quando usare Aggressive:** mercati con trend chiaro, ADX alto e volume crescente.
+> Lo stop stretto (ATR×1.5) limita le perdite su falsi breakout; TP3 (+15%) cattura
+> i movimenti estesi. Non consigliato in fasi laterali o di alta incertezza.
+
+---
+
+## 13. Confronto strategie
+
+| Parametro | Conservative | Aggressive |
 |-----------|-------------|------------|
-| RSI buy zone | 35–50 | 30–58 |
-| EMA reference | EMA(50) | EMA(20) — faster signal |
-| Volume threshold | >1.3× avg | >1.1× avg |
-| RSI sell | >72 | >78 — lets winners run |
-| Stop loss | −3% | −1.5% — cuts losses quicker |
-| Take profit 1 | +5% → close 50% | +3% → close 40% |
-| Take profit 2 | +10% → close 30% | +7% → close 35% |
-| Take profit 3 | — | +15% → close 25% |
-| Cooldown after close | 4h | 1h — re-enters faster |
-| Pause after N SL | 2 consecutive | 3 consecutive |
-| Position size | 1× allocation | 1.25× allocation |
+| RSI buy | 35–50 | 30–58 |
+| EMA riferimento | EMA(50) | EMA(20) |
+| Filtro EMA(200) | Si | No |
+| Volume soglia | >1.3× | >1.1× |
+| ADX minimo | 20 | 15 |
+| RSI sell | >72 | >78 |
+| Stop loss | ATR×2.0 (max −6%) | ATR×1.5 (max −3%) |
+| TP1 | +5% → 50% | +3% → 40% |
+| TP2 | +10% → 30% | +7% → 35% |
+| TP3 | — | +15% → 25% |
+| Trailing stop | −3% dal max | −2% dal max |
+| Time exit | 96h flat | 48h flat |
+| Cooldown | 4h | 1h |
+| Max posizioni | 4 | 6 |
+| Size | 1× | 1.25× |
+| Pause dopo N SL | 2 | 3 |
 
-### Conservative strategy
-
-**Buy signal** (all must be true):
-- RSI(14) between 35 and 50
-- Close price above EMA(50)
-- MACD histogram > 0 or bullish crossover on last candle
-- Volume > 1.3× 20-period average
-
-**Exit rules:**
-- Stop loss at −3% (native Kraken order, active even if bot is offline)
-- TP1 at +5% → close 50%, move SL to breakeven
-- TP2 at +10% → close remaining 30%
-- Sell signal: RSI > 72 or bearish MACD divergence
-
-**Risk controls:**
-- Max 1 open position per asset
-- 4h cooldown after closing any position
-- After 2 consecutive stop-losses → 24h global pause
-
-### Aggressive strategy
-
-**Buy signal** (all must be true):
-- RSI(14) between 30 and 58
-- Close price above EMA(20)
-- MACD histogram > 0 or bullish crossover on last candle
-- Volume > 1.1× 20-period average
-
-**Exit rules:**
-- Stop loss at −1.5% (native Kraken order)
-- TP1 at +3% → close 40%, move SL to breakeven
-- TP2 at +7% → close 35%
-- TP3 at +15% → close remaining 25%
-- Sell signal: RSI > 78 or bearish MACD divergence
-
-**Risk controls:**
-- Max 1 open position per asset
-- 1h cooldown after closing any position
-- Position size is 1.25× the standard allocation (capped at available balance)
-- After 3 consecutive stop-losses → 24h global pause
-
-> **When to use aggressive:** trending markets with high volume and clear momentum.
-> The tighter stop loss (−1.5%) limits damage on false breakouts, while TP3 (+15%)
-> captures extended moves. Not recommended during sideways/choppy conditions.
+```env
+STRATEGIA=conservative   # default
+STRATEGIA=aggressive
+```
 
 ---
 
-## File structure
+## 14. Gestione posizioni
+
+### Ciclo di vita di una posizione
+
+```
+BUY signal
+    └─▶ Ordine limit buy piazzato
+            └─▶ Attesa esecuzione (max 30 min)
+                    ├─▶ [scaduto] → cancellato, retry al prossimo scan
+                    └─▶ [eseguito] → SL nativo + TP1/TP2(/TP3) su Kraken
+                                          │
+                               ┌──────────┼──────────┐
+                             TP1        TP2/3        SL
+                          chiude 40-50%  chiude tot  chiude tot
+                          trailing on   posizione    posizione
+                               │         chiusa       chiusa
+                          prezzo sale
+                               │
+                          trailing SL aggiornato
+                               │
+                          prezzo scende sotto trailing SL
+                               └─▶ chiusura con profitto
+```
+
+### File di stato
+
+| File | Contenuto |
+|------|-----------|
+| `positions.json` | stato live di tutte le posizioni (entry, SL, TP, order ID) |
+| `trades_history.json` | storico completo dei trade chiusi |
+| `bot.log` | log rotante giornaliero |
+| `.pause_until` | timestamp di ripresa dopo pausa globale |
+
+### Notifiche Telegram inviate
+
+| Evento | Messaggio |
+|--------|-----------|
+| Avvio bot | strategia, capitale, prossimo scan |
+| Scan 4h | segnale per ogni asset (RSI, EMA, MACD, Volume, ADX, EMA200) |
+| Ordine inviato | tipo, prezzo limit, quantità, order ID |
+| Posizione aperta | entrata, SL (ATR), TP1/2/3, trailing stop, indicatori |
+| TP1 raggiunto | incasso parziale, trailing stop attivato |
+| TP2/TP3 raggiunto | incasso parziale/finale, P&L totale, ROI |
+| Trailing stop | massimo raggiunto, prezzo di uscita, profitto protetto |
+| Stop loss | perdita, SL consecutivi |
+| Segnale exit | chiusura su RSI/MACD in posizione aperta |
+| Time exit | chiusura posizione piatta per scadenza |
+| Max posizioni | BUY ignorato, limite raggiunto |
+| Pausa attivata | N SL consecutivi, orario ripresa |
+| Errore API | tentativo N/3, retry |
+| Report giornaliero | P&L, trade chiusi, posizioni aperte, fee |
+
+---
+
+## 15. Struttura file
 
 ```
 kraken-bot/
-├── bot.py              # Entry point, scheduling loop
-├── strategy.py         # Indicators and signal generation
-├── kraken_client.py    # Kraken API wrapper (prices, orders, balance)
-├── order_manager.py    # Order lifecycle (place, poll, cancel, TP/SL)
-├── position_manager.py # positions.json read/write with thread locking
-├── risk_manager.py     # Position sizing, pause logic, Kraken minimums
-├── telegram_notify.py  # All Telegram message formatting and sending
-├── positions.json      # Auto-created: live position state
-├── bot.log             # Auto-created: rotating daily log
-├── .pause_until        # Auto-created when global pause is active
-├── .env                # Your secrets (never commit this)
-├── .env.example        # Template
-└── requirements.txt
+├── bot.py                # Entry point, loop 4h, report giornaliero
+├── strategy.py           # Indicatori (RSI, EMA, MACD, ADX, ATR, Volume) e segnali
+├── kraken_client.py      # Wrapper API Kraken (prezzi, ordini, saldo, fee)
+├── order_manager.py      # Ciclo ordini: place → poll → fill → TP/SL/trailing/time exit
+├── position_manager.py   # positions.json e trades_history.json thread-safe
+├── risk_manager.py       # Sizing, livelli SL/TP, StrategyConfig, pausa globale
+├── telegram_notify.py    # Formattazione e invio di tutti i messaggi Telegram
+├── dashboard.py          # Dashboard Streamlit (streamlit run dashboard.py)
+├── positions.json        # Auto-generato: stato posizioni live
+├── trades_history.json   # Auto-generato: storico trade chiusi
+├── bot.log               # Auto-generato: log rotante giornaliero
+├── .pause_until          # Auto-generato: timestamp pausa globale
+├── .env                  # Credenziali e configurazione (non committare)
+├── .env.example          # Template configurazione
+└── requirements.txt      # Dipendenze Python
 ```
