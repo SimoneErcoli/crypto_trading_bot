@@ -154,7 +154,16 @@ def _open_position_worker(asset: str, signal_result) -> None:
 
 # ── Order polling ─────────────────────────────────────────────────────────────
 
+def _is_paper_order(order_id: str) -> bool:
+    return order_id.startswith("PAPER-")
+
+
 def _wait_for_fill(order_id: str, asset: str) -> bool:
+    # Paper orders are considered instantly filled
+    if _is_paper_order(order_id):
+        logger.info(f"[PAPER] {asset}: order {order_id} simulated as filled")
+        return True
+
     deadline = time.time() + ORDER_TIMEOUT_SECONDS
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -179,6 +188,8 @@ def _handle_expired_order(order_id: str, asset: str, limit_price: Decimal) -> No
 
 
 def _get_fill_price(order_id: str) -> Optional[Decimal]:
+    if _is_paper_order(order_id):
+        return None  # caller falls back to the limit price used at order time
     try:
         price = Decimal(str(kc.get_order_status(order_id).get("price", "0")))
         return price if price > 0 else None
@@ -209,8 +220,13 @@ def _exit_monitor_worker(asset: str) -> None:
             cfg = _load_cfg(pos)
             price = kc.get_ticker_price(asset)
 
-            # 1. Check native Kraken order fills (TP/SL)
-            _, reason = _check_native_order_fills(asset, pos, price)
+            # 1. Check TP/SL fills — native orders on live, price-based on paper
+            if rm.is_paper_trading():
+                import strategy as st
+                _, reason = st.check_exit_conditions(asset, float(price), pos)
+            else:
+                _, reason = _check_native_order_fills(asset, pos, price)
+
             if reason == "tp1" and not pos.get("tp1_hit"):
                 _handle_tp1(asset, pos, price)
                 pos = pm.get_position(asset)  # reload after update
@@ -246,6 +262,8 @@ def _check_native_order_fills(
         order_id = pos.get(key)
         if not order_id:
             continue
+        if _is_paper_order(order_id):
+            continue  # paper TP/SL are checked via price levels in strategy.check_exit_conditions
         try:
             if kc.get_order_status(order_id).get("status") == "closed":
                 return True, label
