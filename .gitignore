@@ -217,3 +217,12 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .DS_Store
+
+# Kraken bot — runtime files
+*.log
+*.log.*.zip
+*.log.*
+positions.json
+trades_history.json
+.pause_until
+bot_console.log
