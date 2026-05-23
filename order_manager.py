@@ -40,6 +40,25 @@ ORDER_TIMEOUT_SECONDS = 30 * 60
 POLL_INTERVAL_SECONDS = 60
 
 
+def _clamp_to_min(asset: str, size: Decimal, max_size: Decimal) -> Decimal:
+    """
+    Return size clamped to Kraken's minimum order size.
+    If even the minimum exceeds max_size, return Decimal("0") to signal skip.
+    """
+    min_size = rm.MIN_ORDER_SIZE[asset]
+    if size >= min_size:
+        return size
+    if min_size <= max_size:
+        logger.info(
+            f"{asset}: computed TP size {size} below Kraken minimum {min_size} — bumping up to minimum"
+        )
+        return min_size
+    logger.warning(
+        f"{asset}: TP size {size} below minimum {min_size} and max allowed {max_size} is insufficient — skipping TP order"
+    )
+    return Decimal("0")
+
+
 def open_position(asset: str, signal_result) -> None:
     threading.Thread(
         target=_open_position_worker,
@@ -106,13 +125,40 @@ def _open_position_worker(asset: str, signal_result) -> None:
             tp3_order_id = f"PAPER-TP3-{asset}-{int(time.time())}" if tp3 else None
         else:
             sl_order_id = kc.place_stop_loss(asset, sl, size_asset)
-            tp1_size = rm.floor_asset(size_asset * cfg.tp1_close_pct, asset)
-            tp2_size = rm.floor_asset(size_asset * cfg.tp2_close_pct, asset)
-            tp1_order_id = kc.place_limit_sell(asset, tp1, tp1_size)
-            tp2_order_id = kc.place_limit_sell(asset, tp2, tp2_size)
+
+            tp1_size = _clamp_to_min(
+                asset,
+                rm.floor_asset(size_asset * cfg.tp1_close_pct, asset),
+                size_asset,
+            )
+            if tp1_size > Decimal("0"):
+                tp1_order_id = kc.place_limit_sell(asset, tp1, tp1_size)
+            else:
+                tp1_order_id = None
+                logger.warning(f"{asset}: TP1 sell order skipped (size below minimum after clamping)")
+
+            tp2_size = _clamp_to_min(
+                asset,
+                rm.floor_asset(size_asset * cfg.tp2_close_pct, asset),
+                size_asset,
+            )
+            if tp2_size > Decimal("0"):
+                tp2_order_id = kc.place_limit_sell(asset, tp2, tp2_size)
+            else:
+                tp2_order_id = None
+                logger.warning(f"{asset}: TP2 sell order skipped (size below minimum after clamping)")
+
             if tp3 and cfg.tp3_close_pct:
-                tp3_size = rm.floor_asset(size_asset * cfg.tp3_close_pct, asset)
-                tp3_order_id = kc.place_limit_sell(asset, tp3, tp3_size)
+                tp3_size = _clamp_to_min(
+                    asset,
+                    rm.floor_asset(size_asset * cfg.tp3_close_pct, asset),
+                    size_asset,
+                )
+                if tp3_size > Decimal("0"):
+                    tp3_order_id = kc.place_limit_sell(asset, tp3, tp3_size)
+                else:
+                    tp3_order_id = None
+                    logger.warning(f"{asset}: TP3 sell order skipped (size below minimum after clamping)")
             else:
                 tp3_order_id = None
 

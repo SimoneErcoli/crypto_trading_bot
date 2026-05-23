@@ -7,7 +7,7 @@ Respects Kraken limits: 1 public call/s, 1 private call/2s.
 import os
 import time
 import functools
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
 import krakenex
@@ -42,11 +42,32 @@ KRAKEN_ASSET_SYMBOLS: dict[str, str] = {
     "ATOM": "ATOM",
 }
 
+# Per-asset price decimal precision as enforced by Kraken
+# Source: Kraken AssetPairs `pair_decimals` field
+PRICE_DECIMALS: dict[str, int] = {
+    "BTC":  1,
+    "ETH":  2,
+    "SOL":  2,
+    "XRP":  5,
+    "ADA":  6,
+    "AVAX": 2,
+    "DOT":  4,
+    "LINK": 4,
+    "LTC":  2,
+    "ATOM": 4,
+}
+
 RETRY_DELAYS = [30, 60, 120]
 _last_public_call = 0.0
 _last_private_call = 0.0
 
 _api: Optional[krakenex.API] = None
+
+
+def round_price(asset: str, price: Decimal) -> Decimal:
+    """Round a price to the decimal precision Kraken accepts for that asset pair."""
+    decimals = PRICE_DECIMALS[asset]
+    return price.quantize(Decimal(f"1e-{decimals}"), rounding=ROUND_HALF_UP)
 
 
 def get_api() -> krakenex.API:
@@ -173,6 +194,7 @@ def place_limit_buy(
     """Place a limit buy order. Returns the order transaction ID."""
     pair = KRAKEN_PAIRS[asset]
     api = get_api()
+    price = round_price(asset, price)
 
     def _call():
         return api.query_private("AddOrder", {
@@ -197,6 +219,7 @@ def place_limit_sell(
     """Place a limit sell order. Returns the order transaction ID."""
     pair = KRAKEN_PAIRS[asset]
     api = get_api()
+    price = round_price(asset, price)
 
     def _call():
         return api.query_private("AddOrder", {
@@ -221,6 +244,7 @@ def place_stop_loss(
     """Place a native Kraken stop-loss order. Stays active even if bot is offline."""
     pair = KRAKEN_PAIRS[asset]
     api = get_api()
+    stop_price = round_price(asset, stop_price)
 
     def _call():
         return api.query_private("AddOrder", {
