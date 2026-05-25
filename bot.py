@@ -10,6 +10,7 @@ import signal
 import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Optional
 
 import schedule
 from dotenv import load_dotenv
@@ -44,6 +45,7 @@ from telegram_notify import (
     notify_scan_summary,
     notify_error,
     notify_max_positions_reached,
+    notify_startup_reconcile,
 )
 
 ASSETS = ["BTC", "ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "ATOM"]
@@ -161,6 +163,196 @@ def _check_exit_for_open_position(asset: str, cfg) -> None:
         logger.info(f"{asset}: supplementary exit triggered ({reason}) at {price}")
 
 
+def _find_open_sl(asset: str, open_orders: dict) -> Optional[tuple[str, dict]]:
+    """
+    Scan the open-orders dict (from kc.get_open_orders()) for a native stop-loss
+    sell on *asset*'s pair.  Returns (txid, order_info) or None.
+    """
+    pair = kc.KRAKEN_PAIRS[asset]
+    for txid, info in open_orders.items():
+        descr = info.get("descr", {})
+        if (
+            descr.get("type") == "sell"
+            and descr.get("ordertype") == "stop-loss"
+            and descr.get("pair") == pair
+        ):
+            return txid, info
+    return None
+
+
+def _startup_reconcile() -> None:
+    """
+    Run once at startup. Uses Kraken balances and open orders as the primary
+    source of truth; positions.json is treated as metadata only.
+
+    Decision matrix (per asset):
+
+      Kraken balance  |  positions.json  |  Action
+      ──────────────────────────────────────────────
+      ≥ min_size      |  active          |  Verify / re-place SL if missing
+      ≥ min_size      |  not active      |  Warn (untracked balance)
+      < min_size      |  active          |  Position closed offline → auto-close
+      < min_size      |  not active      |  Nothing to do
+
+    Skips Kraken API calls in paper-trading mode.
+    """
+    logger.info("── Startup reconciliation ──")
+    paper = rm.is_paper_trading()
+    rows: list[dict] = []
+
+    if paper:
+        for asset in ASSETS:
+            pos = pm.get_position(asset)
+            active = bool(pos and pos.get("active"))
+            rows.append({"asset": asset, "active": active, "action": "paper",
+                         "note": "posizione attiva" if active else "inattivo"})
+        for r in rows:
+            icon = "🟢" if r["active"] else "⚫"
+            logger.info(f"  {icon} {r['asset']:<5}: {r['note']}")
+        try:
+            notify_startup_reconcile(rows, Decimal("0"))
+        except Exception as exc:
+            logger.warning(f"reconcile notify failed: {exc}")
+        return
+
+    # ── Live mode: single-shot Kraken state ───────────────────────────────────
+    try:
+        balances    = kc.get_all_balances()
+        open_orders = kc.get_open_orders()
+        eur_balance = balances.get("EUR", Decimal("0"))
+    except Exception as exc:
+        logger.warning(f"Startup reconcile: cannot fetch Kraken state: {exc}")
+        return
+
+    for asset in ASSETS:
+        actual_bal = balances.get(asset, Decimal("0"))
+        min_size   = rm.MIN_ORDER_SIZE[asset]
+        has_bal    = actual_bal >= min_size
+
+        pos            = pm.get_position(asset)
+        active_in_file = bool(pos and pos.get("active"))
+
+        # Find an open native SL for this asset on Kraken
+        sl_on_kraken = _find_open_sl(asset, open_orders)
+
+        row: dict = {"asset": asset, "active": has_bal,
+                     "balance": actual_bal, "action": "ok", "note": ""}
+
+        # ── Quadrant 1: balance present + position known ──────────────────────
+        if has_bal and active_in_file:
+            sl_id = pos.get("order_id_sl", "")
+            is_paper_sl = (not sl_id) or sl_id.startswith("PAPER-")
+
+            if sl_on_kraken:
+                kraken_sl_id, _ = sl_on_kraken
+                if sl_id != kraken_sl_id:
+                    # SL exists but ID drifted (e.g. re-placed manually); sync
+                    pm.update_position(asset, order_id_sl=kraken_sl_id)
+                    row["note"] = f"OK — SL sincronizzato ({kraken_sl_id[:12]}), balance {actual_bal} {asset}"
+                    logger.info(f"{asset}: SL ID updated from {sl_id[:12] if sl_id else 'none'} → {kraken_sl_id[:12]}")
+                else:
+                    row["note"] = f"OK — SL attivo ({sl_id[:12]}), balance {actual_bal} {asset}"
+
+            elif is_paper_sl:
+                # Paper SL or no SL ID — normal for paper mode or fresh positions
+                row["note"] = f"OK — balance {actual_bal} {asset} (SL gestito internamente)"
+
+            else:
+                # Real SL ID recorded but no matching order on Kraken → re-place
+                sl_price = Decimal(str(pos["sl"]))
+                sl_size  = rm.floor_asset(actual_bal, asset)
+                if sl_size >= min_size:
+                    try:
+                        new_sl_id = kc.place_stop_loss(asset, sl_price, sl_size)
+                        pm.update_position(asset, order_id_sl=new_sl_id)
+                        row["action"] = "sl_replaced"
+                        row["note"]   = f"SL ripiazzato @ €{sl_price} per {sl_size} {asset}"
+                        logger.warning(f"{asset}: SL missing on Kraken — re-placed @ €{sl_price}")
+                    except Exception as exc:
+                        row["action"] = "warning"
+                        row["note"]   = f"SL mancante, ripiazza fallito: {exc}"
+                        logger.error(f"{asset}: could not re-place SL: {exc}")
+                else:
+                    row["action"] = "warning"
+                    row["note"]   = f"SL mancante, balance {actual_bal} < min {min_size} — non ripiazzato"
+                    logger.warning(f"{asset}: SL missing and balance {actual_bal} < min {min_size}")
+
+        # ── Quadrant 2: balance present but not tracked in positions.json ─────
+        elif has_bal and not active_in_file:
+            row["action"] = "warning"
+            row["note"]   = f"balance non tracciata: {actual_bal} {asset}"
+            logger.warning(f"{asset}: untracked balance {actual_bal} on Kraken — no positions.json entry")
+
+        # ── Quadrant 3: no balance but positions.json says active ─────────────
+        elif not has_bal and active_in_file:
+            # Position was closed while the bot was offline (SL fired or manual sell).
+            # Try to get the real fill price from the recorded SL order.
+            sl_id         = pos.get("order_id_sl", "")
+            sl_fill_price = None
+
+            if sl_id and not sl_id.startswith("PAPER-"):
+                try:
+                    sl_info   = kc.get_order_status(sl_id)
+                    sl_status = sl_info.get("status", "unknown")
+                    if sl_status == "closed":
+                        raw_p = sl_info.get("price", "0")
+                        if float(raw_p or 0) > 0:
+                            sl_fill_price = Decimal(str(raw_p))
+                except Exception:
+                    pass
+
+            # Fall back to the recorded SL price if no fill data available
+            exit_price = sl_fill_price or Decimal(str(pos["sl"]))
+
+            # Account for any partial closes already recorded (TP1/TP2)
+            pos_cfg      = rm.AGGRESSIVE if pos.get("strategy") == "aggressive" else rm.CONSERVATIVE
+            remaining_pct = Decimal("1")
+            if pos.get("tp1_hit"):
+                remaining_pct -= pos_cfg.tp1_close_pct
+            if pos.get("tp2_hit"):
+                remaining_pct -= pos_cfg.tp2_close_pct
+
+            size_asset  = Decimal(str(pos["size_asset"]))
+            expected    = rm.floor_asset(size_asset * remaining_pct, asset)
+            size_eur    = Decimal(str(pos["size_eur"]))
+            entry_price = Decimal(str(pos["entry_price"]))
+
+            exit_value = (exit_price * expected).quantize(Decimal("0.01"))
+            fee        = (exit_value * Decimal("0.0016")).quantize(Decimal("0.01"))
+            pnl        = exit_value - (size_eur * remaining_pct) - fee
+            sign       = "+" if pnl >= 0 else ""
+
+            pm.close_position(asset)
+            pm.record_closed_trade(
+                asset=asset, entry_price=entry_price, exit_price=exit_price,
+                size_asset=expected, size_eur=size_eur * remaining_pct,
+                pnl=pnl, fee=fee, reason="stop_loss_offline",
+            )
+            row["action"] = "auto_closed"
+            row["active"] = False
+            row["note"]   = f"chiuso offline @ €{exit_price} — P&L {sign}€{pnl:.2f}"
+            logger.warning(f"{asset}: no balance on Kraken, was marked active — auto-closed (P&L {sign}€{pnl:.2f})")
+
+        # ── Quadrant 4: no balance, no position ───────────────────────────────
+        else:
+            row["note"] = "inattivo"
+
+        rows.append(row)
+
+    # ── Log summary table ─────────────────────────────────────────────────────
+    logger.info(f"Startup reconciliation — EUR balance: €{eur_balance}")
+    for r in rows:
+        icon = {"ok": "✓", "auto_closed": "✗", "sl_replaced": "⚠",
+                "warning": "⚠", "paper": "~"}.get(r["action"], "?")
+        logger.info(f"  {icon} {r['asset']:<5}: {r['note']}")
+    logger.info("── Reconciliation complete ──")
+
+    try:
+        notify_startup_reconcile(rows, eur_balance)
+    except Exception as exc:
+        logger.warning(f"reconcile notify failed: {exc}")
+
+
 def _resume_exit_monitors() -> None:
     """
     Called once on startup. For each asset that has an active position in
@@ -243,6 +435,14 @@ def main() -> None:
     except Exception as exc:
         logger.warning(f"Could not fetch initial balance: {exc}")
         _session_start_capital = capital
+
+    # Pre-fetch live Kraken minimum order sizes for all assets (single public API call).
+    # Runs in both live and paper mode — paper orders still validate sizes before simulating.
+    kc.warmup_ordermin_cache(ASSETS)
+
+    # Reconcile positions.json with actual Kraken state:
+    # auto-closes SL-fired-offline positions, re-places missing SLs, warns on anomalies.
+    _startup_reconcile()
 
     # Restart exit monitors for positions that survived a previous run
     _resume_exit_monitors()

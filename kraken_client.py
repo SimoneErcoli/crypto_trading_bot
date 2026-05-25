@@ -62,12 +62,99 @@ _last_public_call = 0.0
 _last_private_call = 0.0
 
 _api: Optional[krakenex.API] = None
+_ordermin_cache: dict[str, Decimal] = {}   # populated lazily by get_ordermin()
 
 
 def round_price(asset: str, price: Decimal) -> Decimal:
     """Round a price to the decimal precision Kraken accepts for that asset pair."""
     decimals = PRICE_DECIMALS[asset]
     return price.quantize(Decimal(f"1e-{decimals}"), rounding=ROUND_HALF_UP)
+
+
+def get_ordermin(asset: str) -> Optional[Decimal]:
+    """
+    Return the minimum order volume for *asset* as reported by Kraken's AssetPairs API.
+    Results are cached for the process lifetime (the value never changes at runtime).
+    Returns None if the API call fails — callers should fall back to MIN_ORDER_SIZE.
+    """
+    if asset in _ordermin_cache:
+        return _ordermin_cache[asset]
+
+    pair = KRAKEN_PAIRS[asset]
+    api = get_api()
+    try:
+        _rate_limit_public()
+        result = api.query_public("AssetPairs", {"pair": pair})
+        if result.get("error"):
+            logger.debug(f"{asset}: AssetPairs error {result['error']}")
+            return None
+        pair_data = next(iter(result["result"].values()))
+        raw_min = pair_data.get("ordermin")
+        if raw_min:
+            ordermin = Decimal(str(raw_min))
+            _ordermin_cache[asset] = ordermin
+            logger.debug(f"{asset}: Kraken live ordermin={ordermin}")
+            return ordermin
+    except Exception as exc:
+        logger.debug(f"{asset}: could not fetch ordermin: {exc}")
+    return None
+
+
+def warmup_ordermin_cache(assets: list[str]) -> None:
+    """
+    Pre-fetch the live minimum order sizes for all *assets* in a single public API call.
+    Call once at bot startup so the cache is hot before any order is placed.
+    For assets where the fetch fails the hardcoded MIN_ORDER_SIZE is used as fallback.
+    Always prints a summary table (INFO level) so startup logs show the active minimums.
+    """
+    from risk_manager import MIN_ORDER_SIZE  # local import to avoid circular dep at module load
+
+    pairs_str = ",".join(KRAKEN_PAIRS[a] for a in assets)
+    api = get_api()
+    try:
+        _rate_limit_public()
+        result = api.query_public("AssetPairs", {"pair": pairs_str})
+        errors = result.get("error") or []
+        if errors:
+            logger.warning(f"warmup_ordermin_cache: AssetPairs returned errors {errors} — using hardcoded minimums")
+        else:
+            kraken_data = result.get("result", {})
+            for asset in assets:
+                pair = KRAKEN_PAIRS[asset]
+                # Kraken may return the pair under its canonical name or an altname; try both
+                pair_data = kraken_data.get(pair)
+                if pair_data is None:
+                    # fuzzy fallback: find any key that contains or is contained by the pair name
+                    matched_key = next(
+                        (k for k in kraken_data if pair.upper() in k.upper() or k.upper() in pair.upper()),
+                        None,
+                    )
+                    if matched_key:
+                        pair_data = kraken_data[matched_key]
+
+                if pair_data is None:
+                    logger.warning(f"{asset}: not found in AssetPairs response — will use hardcoded {MIN_ORDER_SIZE[asset]}")
+                    continue
+
+                raw_min = pair_data.get("ordermin")
+                if raw_min:
+                    ordermin = Decimal(str(raw_min))
+                    _ordermin_cache[asset] = ordermin
+
+    except Exception as exc:
+        logger.warning(f"warmup_ordermin_cache: API call failed ({exc}) — all assets will use hardcoded minimums")
+
+    # Always print the active minimum for every asset so startup logs are self-documenting
+    lines = []
+    for asset in assets:
+        live = _ordermin_cache.get(asset)
+        hardcoded = MIN_ORDER_SIZE[asset]
+        if live is not None:
+            flag = "⚠ DIFFERS" if live != hardcoded else "✓"
+            lines.append(f"  {asset:<5} live={live}  hardcoded={hardcoded}  {flag}")
+        else:
+            lines.append(f"  {asset:<5} live=N/A  hardcoded={hardcoded}  (fallback)")
+    logger.info("Order minimums in effect:\n" + "\n".join(lines))
 
 
 def get_api() -> krakenex.API:
@@ -163,8 +250,27 @@ def get_ticker_price(asset: str) -> Decimal:
     return Decimal(price_str)
 
 
+def get_all_balances() -> dict[str, Decimal]:
+    """
+    Fetch all account balances in a single private API call.
+    Returns a dict keyed by internal symbol ('EUR', 'BTC', 'ETH', …).
+    """
+    api = get_api()
+
+    def _call():
+        return api.query_private("Balance")
+
+    raw = _with_retry(_call, is_private=True)
+    result = raw["result"]
+    balances: dict[str, Decimal] = {}
+    balances["EUR"] = Decimal(result.get("ZEUR", "0"))
+    for asset, symbol in KRAKEN_ASSET_SYMBOLS.items():
+        balances[asset] = Decimal(result.get(symbol, "0"))
+    return balances
+
+
 def get_eur_balance() -> Decimal:
-    """Return available EUR balance."""
+    """Return available EUR balance (convenience wrapper over get_all_balances)."""
     api = get_api()
 
     def _call():
@@ -290,6 +396,21 @@ def get_order_status(order_id: str) -> dict:
 
     raw = _with_retry(_call, is_private=True)
     return raw["result"].get(order_id, {})
+
+
+def get_open_orders() -> dict:
+    """
+    Return all currently open orders on the account, keyed by txid.
+    Each value is an order-info dict as returned by Kraken's OpenOrders endpoint.
+    Typical keys inside each order: descr (pair, type, ordertype, price), vol, vol_exec, status.
+    """
+    api = get_api()
+
+    def _call():
+        return api.query_private("OpenOrders")
+
+    raw = _with_retry(_call, is_private=True)
+    return raw["result"].get("open", {})
 
 
 def get_trade_fee(asset: str) -> Decimal:

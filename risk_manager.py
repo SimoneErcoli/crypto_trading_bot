@@ -12,18 +12,27 @@ from typing import Optional
 
 from loguru import logger
 
-# ── Kraken minimum order sizes ────────────────────────────────────────────────
+# ── Kraken minimum order sizes (fallback) ─────────────────────────────────────
+# These are used as a safety net when the live Kraken AssetPairs fetch fails.
+# At runtime, kraken_client.warmup_ordermin_cache() fetches the real values and
+# overrides these. Update this table whenever Kraken changes a minimum.
+#
+# Last verified against Kraken AssetPairs API (errors observed in production):
+#   ATOM  1.7635 rejected → minimum ≥ 2.0
+#   LINK  0.5304 rejected → minimum ≥ 0.6
+#   DOT   1.8082 rejected → minimum ≥ 2.0
+#   AVAX  0.2487 rejected → minimum ≥ 0.25
 MIN_ORDER_SIZE: dict[str, Decimal] = {
     "BTC":  Decimal("0.0001"),
     "ETH":  Decimal("0.01"),
-    "SOL":  Decimal("0.5"),
+    "SOL":  Decimal("1.0"),    # Kraken SOL/EUR ordermin (conservative; 0.5 may be too low)
     "XRP":  Decimal("10"),
-    "ADA":  Decimal("5"),
-    "AVAX": Decimal("0.1"),
-    "DOT":  Decimal("0.5"),
-    "LINK": Decimal("0.2"),
-    "LTC":  Decimal("0.05"),
-    "ATOM": Decimal("0.5"),
+    "ADA":  Decimal("15"),     # Kraken ADA/EUR ordermin (conservative; 5 is too low)
+    "AVAX": Decimal("0.25"),   # verified: 0.2487 rejected
+    "DOT":  Decimal("2.0"),    # verified: 1.8082 rejected
+    "LINK": Decimal("0.6"),    # verified: 0.5304 rejected
+    "LTC":  Decimal("0.1"),    # Kraken LTC/EUR ordermin (conservative; 0.05 may be too low)
+    "ATOM": Decimal("2.0"),    # verified: 1.7635 rejected
 }
 
 ASSET_DECIMALS: dict[str, int] = {

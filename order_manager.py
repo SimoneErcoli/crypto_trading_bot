@@ -40,12 +40,21 @@ ORDER_TIMEOUT_SECONDS = 30 * 60
 POLL_INTERVAL_SECONDS = 60
 
 
+def _cancel_if_live(order_id: Optional[str]) -> None:
+    """Cancel a Kraken order only when it is a real (non-PAPER) order ID."""
+    if order_id and not _is_paper_order(order_id):
+        kc.cancel_order(order_id)
+
+
 def _clamp_to_min(asset: str, size: Decimal, max_size: Decimal) -> Decimal:
     """
     Return size clamped to Kraken's minimum order size.
-    If even the minimum exceeds max_size, return Decimal("0") to signal skip.
+    Prefers the live ordermin from the cache (populated at startup by warmup_ordermin_cache);
+    falls back to the hardcoded MIN_ORDER_SIZE when the cache has no entry.
+    Returns Decimal("0") when even the minimum exceeds max_size — caller skips the order.
     """
-    min_size = rm.MIN_ORDER_SIZE[asset]
+    live_min = kc.get_ordermin(asset)
+    min_size = live_min if live_min is not None else rm.MIN_ORDER_SIZE[asset]
     if size >= min_size:
         return size
     if min_size <= max_size:
@@ -91,6 +100,24 @@ def _open_position_worker(asset: str, signal_result) -> None:
             logger.warning(f"{asset}: cannot size position, skipping")
             return
 
+        # Cross-check against the live Kraken ordermin (may differ from our hardcoded value)
+        live_min = kc.get_ordermin(asset)
+        if live_min and size_asset < live_min:
+            min_cost = (live_min * price).quantize(Decimal("0.01"))
+            if min_cost <= eur_balance:
+                logger.info(
+                    f"{asset}: buy size {size_asset} below live Kraken minimum {live_min} — "
+                    f"scaling up to {live_min} (€{min_cost})"
+                )
+                size_asset = live_min
+                size_eur = min_cost
+            else:
+                logger.warning(
+                    f"{asset}: buy size {size_asset} below live minimum {live_min}; "
+                    f"min cost €{min_cost} exceeds available balance €{eur_balance}. Skipping."
+                )
+                return
+
         # ATR-based SL (from signal indicators)
         atr = getattr(signal_result, "atr", None)
         sl, tp1, tp2, tp3 = rm.calculate_levels(price, cfg, atr=atr)
@@ -118,49 +145,23 @@ def _open_position_worker(asset: str, signal_result) -> None:
         actual_value = (fill_price * size_asset).quantize(Decimal("0.01"))
         fee = (actual_value * (Decimal("0.0016") if paper else kc.get_trade_fee(asset))).quantize(Decimal("0.01"))
 
+        ts = int(time.time())
         if paper:
-            sl_order_id  = f"PAPER-SL-{asset}-{int(time.time())}"
-            tp1_order_id = f"PAPER-TP1-{asset}-{int(time.time())}"
-            tp2_order_id = f"PAPER-TP2-{asset}-{int(time.time())}"
-            tp3_order_id = f"PAPER-TP3-{asset}-{int(time.time())}" if tp3 else None
+            sl_order_id  = f"PAPER-SL-{asset}-{ts}"
         else:
+            # On Kraken spot, a native SL reserves the full position, making simultaneous
+            # native TP sell orders impossible (EOrder:Insufficient funds).
+            # Solution: only place the native SL. All TP levels are monitored and executed
+            # by the exit-monitor thread (price-based), which cancels the SL, sells the
+            # partial amount, and re-places the SL at breakeven for the remainder.
             sl_order_id = kc.place_stop_loss(asset, sl, size_asset)
+            logger.info(f"{asset}: native SL placed ({sl_order_id}); TPs managed by exit monitor")
 
-            tp1_size = _clamp_to_min(
-                asset,
-                rm.floor_asset(size_asset * cfg.tp1_close_pct, asset),
-                size_asset,
-            )
-            if tp1_size > Decimal("0"):
-                tp1_order_id = kc.place_limit_sell(asset, tp1, tp1_size)
-            else:
-                tp1_order_id = None
-                logger.warning(f"{asset}: TP1 sell order skipped (size below minimum after clamping)")
-
-            tp2_size = _clamp_to_min(
-                asset,
-                rm.floor_asset(size_asset * cfg.tp2_close_pct, asset),
-                size_asset,
-            )
-            if tp2_size > Decimal("0"):
-                tp2_order_id = kc.place_limit_sell(asset, tp2, tp2_size)
-            else:
-                tp2_order_id = None
-                logger.warning(f"{asset}: TP2 sell order skipped (size below minimum after clamping)")
-
-            if tp3 and cfg.tp3_close_pct:
-                tp3_size = _clamp_to_min(
-                    asset,
-                    rm.floor_asset(size_asset * cfg.tp3_close_pct, asset),
-                    size_asset,
-                )
-                if tp3_size > Decimal("0"):
-                    tp3_order_id = kc.place_limit_sell(asset, tp3, tp3_size)
-                else:
-                    tp3_order_id = None
-                    logger.warning(f"{asset}: TP3 sell order skipped (size below minimum after clamping)")
-            else:
-                tp3_order_id = None
+        # TP order IDs use PAPER-style prefixes so the exit monitor uses price-based
+        # logic for them in both paper and live mode.
+        tp1_order_id = f"PAPER-TP1-{asset}-{ts}"
+        tp2_order_id = f"PAPER-TP2-{asset}-{ts}"
+        tp3_order_id = f"PAPER-TP3-{asset}-{ts}" if tp3 else None
 
         pm.update_position(
             asset,
@@ -266,12 +267,21 @@ def _exit_monitor_worker(asset: str) -> None:
             cfg = _load_cfg(pos)
             price = kc.get_ticker_price(asset)
 
-            # 1. Check TP/SL fills — native orders on live, price-based on paper
+            # 1. Check exits
+            # Paper: pure price-based (no Kraken calls).
+            # Live:  native order check covers the real SL;
+            #        price-based check covers TPs (no native TP orders placed).
+            import strategy as st
             if rm.is_paper_trading():
-                import strategy as st
                 _, reason = st.check_exit_conditions(asset, float(price), pos)
             else:
-                _, reason = _check_native_order_fills(asset, pos, price)
+                _, native_reason = _check_native_order_fills(asset, pos, price)
+                if native_reason:
+                    reason = native_reason
+                else:
+                    _, price_reason = st.check_exit_conditions(asset, float(price), pos)
+                    # Ignore the price-based SL trigger — the native Kraken SL handles it.
+                    reason = price_reason if price_reason != "stop_loss" else ""
 
             if reason == "tp1" and not pos.get("tp1_hit"):
                 _handle_tp1(asset, pos, price)
@@ -359,11 +369,8 @@ def _handle_trailing_exit(
     profit = exit_value - remaining_eur - fee + _tp1_profit(pos, cfg)
 
     if not rm.is_paper_trading():
-        # Cancel remaining native SL/TP orders
         for key in ["order_id_sl", "order_id_tp2", "order_id_tp3"]:
-            oid = pos.get(key)
-            if oid:
-                kc.cancel_order(oid)
+            _cancel_if_live(pos.get(key))
         kc.place_limit_sell(asset, price, remaining)
 
     pm.close_position(asset)
@@ -408,9 +415,7 @@ def _handle_time_exit(asset: str, pos: dict, price: Decimal) -> None:
 
     if not rm.is_paper_trading():
         for key in ["order_id_sl", "order_id_tp1", "order_id_tp2", "order_id_tp3"]:
-            oid = pos.get(key)
-            if oid:
-                kc.cancel_order(oid)
+            _cancel_if_live(pos.get(key))
         kc.place_limit_sell(asset, price, size_asset)
 
     pm.close_position(asset)
@@ -451,9 +456,7 @@ def _signal_exit_worker(asset: str, current_price: Decimal) -> None:
 
         if not rm.is_paper_trading():
             for key in ["order_id_sl", "order_id_tp1", "order_id_tp2", "order_id_tp3"]:
-                oid = pos.get(key)
-                if oid:
-                    kc.cancel_order(oid)
+                _cancel_if_live(pos.get(key))
             kc.place_limit_sell(asset, current_price, remaining)
 
         pm.close_position(asset)
@@ -484,9 +487,13 @@ def _handle_tp1(asset: str, pos: dict, price: Decimal) -> None:
     remaining = rm.floor_asset(Decimal(str(pos["size_asset"])) * remaining_pct, asset)
 
     if not rm.is_paper_trading():
-        if pos.get("order_id_sl"):
-            kc.cancel_order(pos["order_id_sl"])
-        # Place native SL at breakeven as safety net
+        # Cancel full-position SL so the asset is freed for the partial sell.
+        _cancel_if_live(pos.get("order_id_sl"))
+        # Execute the TP1 partial close.
+        tp1_size_clamped = _clamp_to_min(asset, tp1_size, Decimal(str(pos["size_asset"])))
+        if tp1_size_clamped > Decimal("0"):
+            kc.place_limit_sell(asset, tp1, tp1_size_clamped)
+        # Re-place native SL at breakeven for the remaining portion.
         new_sl_id = kc.place_stop_loss(asset, entry, remaining)
         pm.update_position(asset, order_id_sl=new_sl_id)
 
@@ -509,13 +516,28 @@ def _handle_tp1(asset: str, pos: dict, price: Decimal) -> None:
 
 def _handle_tp2(asset: str, pos: dict, price: Decimal) -> None:
     cfg = _load_cfg(pos)
-    tp2      = Decimal(str(pos["tp2"]))
-    tp2_size = rm.floor_asset(Decimal(str(pos["size_asset"])) * cfg.tp2_close_pct, asset)
+    tp2       = Decimal(str(pos["tp2"]))
+    tp2_size  = rm.floor_asset(Decimal(str(pos["size_asset"])) * cfg.tp2_close_pct, asset)
     tp2_value = (tp2 * tp2_size).quantize(Decimal("0.01"))
-    fee      = (tp2_value * Decimal("0.0016")).quantize(Decimal("0.01"))
+    fee       = (tp2_value * Decimal("0.0016")).quantize(Decimal("0.01"))
     entry_eur = Decimal(str(pos["size_eur"]))
+    entry     = Decimal(str(pos["entry_price"]))
 
     has_tp3 = pos.get("tp3") is not None
+
+    if not rm.is_paper_trading():
+        # Cancel breakeven SL (placed after TP1); free asset for the partial sell.
+        _cancel_if_live(pos.get("order_id_sl"))
+        tp2_size_clamped = _clamp_to_min(asset, tp2_size, Decimal(str(pos["size_asset"])))
+        if tp2_size_clamped > Decimal("0"):
+            kc.place_limit_sell(asset, tp2, tp2_size_clamped)
+        if has_tp3:
+            # Re-place SL at breakeven for the remaining tp3 portion.
+            tp3_size = rm.floor_asset(Decimal(str(pos["size_asset"])) * cfg.tp3_close_pct, asset)
+            if tp3_size > Decimal("0"):
+                new_sl_id = kc.place_stop_loss(asset, entry, tp3_size)
+                pm.update_position(asset, order_id_sl=new_sl_id)
+
     if not has_tp3:
         pm.close_position(asset)
     else:
@@ -523,7 +545,7 @@ def _handle_tp2(asset: str, pos: dict, price: Decimal) -> None:
 
     partial_pnl = tp2_value - (entry_eur * cfg.tp2_close_pct) - fee
     pm.record_closed_trade(
-        asset=asset, entry_price=Decimal(str(pos["entry_price"])), exit_price=tp2,
+        asset=asset, entry_price=entry, exit_price=tp2,
         size_asset=tp2_size, size_eur=entry_eur * cfg.tp2_close_pct,
         pnl=partial_pnl, fee=fee, reason="tp2",
     )
@@ -541,14 +563,21 @@ def _handle_tp2(asset: str, pos: dict, price: Decimal) -> None:
 
 def _handle_tp3(asset: str, pos: dict, price: Decimal) -> None:
     cfg = _load_cfg(pos)
-    tp3      = Decimal(str(pos["tp3"]))
-    tp3_size = rm.floor_asset(Decimal(str(pos["size_asset"])) * cfg.tp3_close_pct, asset)
+    tp3       = Decimal(str(pos["tp3"]))
+    tp3_size  = rm.floor_asset(Decimal(str(pos["size_asset"])) * cfg.tp3_close_pct, asset)
     tp3_value = (tp3 * tp3_size).quantize(Decimal("0.01"))
-    fee      = (tp3_value * Decimal("0.0016")).quantize(Decimal("0.01"))
+    fee       = (tp3_value * Decimal("0.0016")).quantize(Decimal("0.01"))
     entry_eur = Decimal(str(pos["size_eur"]))
-    partial_pnl = tp3_value - (entry_eur * cfg.tp3_close_pct) - fee
+    partial_pnl  = tp3_value - (entry_eur * cfg.tp3_close_pct) - fee
     profit_total = _tp1_profit(pos, cfg) + _tp2_profit(pos, cfg) + partial_pnl
     roi = (profit_total / entry_eur * Decimal("100")).quantize(Decimal("0.1"))
+
+    if not rm.is_paper_trading():
+        # Cancel remaining SL (from after TP2), then sell the final portion.
+        _cancel_if_live(pos.get("order_id_sl"))
+        tp3_size_clamped = _clamp_to_min(asset, tp3_size, Decimal(str(pos["size_asset"])))
+        if tp3_size_clamped > Decimal("0"):
+            kc.place_limit_sell(asset, tp3, tp3_size_clamped)
 
     pm.close_position(asset)
     pm.record_closed_trade(

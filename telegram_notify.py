@@ -460,6 +460,48 @@ def kc_price_safe(asset: str) -> Optional[Decimal]:
         return None
 
 
+def notify_startup_reconcile(rows: list[dict], eur_balance: Decimal) -> None:
+    """
+    Startup portfolio reconciliation summary.
+    rows: list of dicts with keys: asset, active, action, note
+      action values: ok | auto_closed | sl_replaced | warning | paper
+    """
+    now = datetime.now(timezone.utc).strftime("%d/%m %H:%M")
+    lines = [
+        f"🔄 Riconciliazione avvio — {now} UTC",
+        SEP,
+        f"💶 EUR disponibile: €{eur_balance}",
+        SEP,
+    ]
+
+    has_issues = False
+    for row in rows:
+        asset  = row["asset"]
+        action = row.get("action", "ok")
+        note   = row.get("note", "")
+
+        if action == "auto_closed":
+            lines.append(f"🔴 {asset}: {note}")
+            has_issues = True
+        elif action == "sl_replaced":
+            lines.append(f"⚠️ {asset}: {note}")
+            has_issues = True
+        elif action == "warning":
+            lines.append(f"⚠️ {asset}: {note}")
+            has_issues = True
+        elif row.get("active"):
+            lines.append(f"🟢 {asset}: posizione attiva — OK")
+        else:
+            lines.append(f"⚫ {asset}: inattivo")
+
+    lines.append(SEP)
+    if has_issues:
+        lines.append("⚠️ Alcune posizioni aggiornate — controlla il log.")
+    else:
+        lines.append("✅ Tutto allineato, nessuna discrepanza.")
+    _send("\n".join(lines))
+
+
 def notify_error(context: str, error: str) -> None:
     text = (
         f"🚨 ERRORE NON GESTITO\n"
