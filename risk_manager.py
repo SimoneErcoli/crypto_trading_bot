@@ -64,17 +64,31 @@ ALLOCATIONS: dict[str, Decimal] = {
 
 PAUSE_FILE = Path(".pause_until")
 
+# Default asset universe for the swing strategies (conservative / aggressive)
+SWING_ASSETS: tuple[str, ...] = (
+    "BTC", "ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "ATOM",
+)
+
+# Scalping works on BTC only: the most liquid EUR pair on Kraken (tight spread,
+# deep book) and the only one whose ordermin (~€10) suits a small account.
+SCALP_ASSETS: tuple[str, ...] = ("BTC",)
+
 
 # ── Strategy configuration ────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class StrategyConfig:
     name: str
+    # Market scope / timing
+    assets: tuple[str, ...]             # tradable universe for this strategy
+    timeframe_minutes: int              # OHLC candle interval
+    scan_interval_minutes: int          # how often the signal scan runs
+    signal_mode: str                    # "swing" | "scalp" — selects signal logic
     # Signal thresholds
     rsi_buy_low: int
     rsi_buy_high: int
     rsi_sell: int
-    ema_ref: str                        # "ema20" | "ema50"
+    ema_ref: str                        # "ema20" | "ema21" | "ema50"
     volume_multiplier: float
     # Trend filters
     adx_min: int                        # minimum ADX to confirm trend (0 = disabled)
@@ -92,15 +106,23 @@ class StrategyConfig:
     trailing_stop_pct: Decimal          # trail SL at X% below high after TP1
     max_position_hours: int             # close flat positions after N hours (0 = disabled)
     flat_threshold_pct: Decimal         # |pnl| < this % = "flat" for time exit
+    # Order handling
+    entry_timeout_minutes: int          # cancel unfilled limit entry after N minutes
+    exit_poll_seconds: int              # exit-monitor / fill-poll cadence
     # Behaviour
-    cooldown_hours: int
+    cooldown_minutes: int
     max_consecutive_losses: int
     max_open_positions: int             # global concurrent position limit
     size_multiplier: Decimal
+    use_risk_sizing: bool               # size from equity risk instead of fixed allocations
 
 
 CONSERVATIVE = StrategyConfig(
     name="conservative",
+    assets=SWING_ASSETS,
+    timeframe_minutes=240,
+    scan_interval_minutes=240,
+    signal_mode="swing",
     rsi_buy_low=35,
     rsi_buy_high=50,
     rsi_sell=72,
@@ -119,14 +141,21 @@ CONSERVATIVE = StrategyConfig(
     trailing_stop_pct=Decimal("0.03"),
     max_position_hours=96,
     flat_threshold_pct=Decimal("0.005"),
-    cooldown_hours=4,
+    entry_timeout_minutes=30,
+    exit_poll_seconds=60,
+    cooldown_minutes=240,
     max_consecutive_losses=2,
     max_open_positions=4,
     size_multiplier=Decimal("1.0"),
+    use_risk_sizing=False,
 )
 
 AGGRESSIVE = StrategyConfig(
     name="aggressive",
+    assets=SWING_ASSETS,
+    timeframe_minutes=240,
+    scan_interval_minutes=240,
+    signal_mode="swing",
     rsi_buy_low=30,
     rsi_buy_high=58,
     rsi_sell=78,
@@ -145,13 +174,59 @@ AGGRESSIVE = StrategyConfig(
     trailing_stop_pct=Decimal("0.02"),
     max_position_hours=48,
     flat_threshold_pct=Decimal("0.005"),
-    cooldown_hours=1,
+    entry_timeout_minutes=30,
+    exit_poll_seconds=60,
+    cooldown_minutes=60,
     max_consecutive_losses=3,
     max_open_positions=6,
     size_multiplier=Decimal("1.25"),
+    use_risk_sizing=False,
 )
 
-_CONFIGS = {"conservative": CONSERVATIVE, "aggressive": AGGRESSIVE}
+# Scalping: 15m candles on BTC only, scan every 5 minutes, one position at
+# a time. Targets are sized so that TP1 (+1.2%) clears a full maker round
+# trip (~0.32%) with margin; SL is ATR-based and capped at -0.8%.
+# Funds are managed dynamically: position size derives from live equity
+# (EUR balance + open positions); with a single slot the whole equity
+# (minus the fee buffer) backs the trade, risking ~0.8% of it per stop.
+SCALPING = StrategyConfig(
+    name="scalping",
+    assets=SCALP_ASSETS,
+    timeframe_minutes=15,
+    scan_interval_minutes=5,
+    signal_mode="scalp",
+    rsi_buy_low=38,
+    rsi_buy_high=62,
+    rsi_sell=78,
+    ema_ref="ema21",
+    volume_multiplier=1.1,
+    adx_min=15,
+    use_ema200_filter=False,
+    sl_pct=Decimal("0.008"),
+    atr_sl_multiplier=Decimal("1.2"),
+    tp1_pct=Decimal("0.012"),
+    tp1_close_pct=Decimal("0.50"),
+    tp2_pct=Decimal("0.025"),
+    tp2_close_pct=Decimal("0.50"),
+    tp3_pct=None,
+    tp3_close_pct=None,
+    trailing_stop_pct=Decimal("0.008"),
+    max_position_hours=6,
+    flat_threshold_pct=Decimal("0.002"),
+    entry_timeout_minutes=5,
+    exit_poll_seconds=15,
+    cooldown_minutes=30,
+    max_consecutive_losses=3,
+    max_open_positions=1,
+    size_multiplier=Decimal("1.0"),
+    use_risk_sizing=True,
+)
+
+_CONFIGS = {
+    "conservative": CONSERVATIVE,
+    "aggressive": AGGRESSIVE,
+    "scalping": SCALPING,
+}
 
 
 def get_strategy_config() -> StrategyConfig:
@@ -161,6 +236,11 @@ def get_strategy_config() -> StrategyConfig:
         logger.warning(f"Unknown STRATEGIA='{name}', falling back to conservative")
         return CONSERVATIVE
     return cfg
+
+
+def get_config_by_name(name: Optional[str]) -> StrategyConfig:
+    """Resolve a strategy name stored in positions.json back to its config."""
+    return _CONFIGS.get((name or "").lower().strip(), CONSERVATIVE)
 
 
 # ── Global pause ──────────────────────────────────────────────────────────────
@@ -198,6 +278,26 @@ def get_pause_resume_time() -> Optional[datetime]:
 
 # ── Position sizing ───────────────────────────────────────────────────────────
 
+# Keep a slice of the available EUR unspent so fees never push the account
+# into "insufficient funds" on subsequent orders.
+FEE_BUFFER = Decimal("0.99")
+
+
+def get_effective_capital(eur_balance: Decimal) -> Decimal:
+    """
+    Live equity estimate: free EUR plus the book value of all open positions.
+    Keeps sizing proportional to the real account instead of the static
+    CAPITALE_TOTALE env value.
+    """
+    import position_manager as pm  # local import to avoid cycles at module load
+    open_value = sum(
+        Decimal(str(p.get("size_eur", "0")))
+        for p in pm.get_all_positions().values()
+        if p.get("active")
+    )
+    return eur_balance + open_value
+
+
 def calculate_position_size(
     asset: str,
     price: Decimal,
@@ -208,10 +308,18 @@ def calculate_position_size(
     if cfg is None:
         cfg = get_strategy_config()
 
-    allocation = ALLOCATIONS[asset]
-    target_eur = (capital * allocation * cfg.size_multiplier).quantize(Decimal("0.01"))
+    if cfg.use_risk_sizing:
+        # Risk-based sizing: risk a fixed fraction of equity per trade given the
+        # SL distance, capped by an equal split of equity across position slots.
+        risk_amount = capital * get_risk_per_trade()
+        risk_target = risk_amount / cfg.sl_pct
+        slot_cap = capital / Decimal(cfg.max_open_positions)
+        target_eur = (min(risk_target, slot_cap) * cfg.size_multiplier).quantize(Decimal("0.01"))
+    else:
+        allocation = ALLOCATIONS[asset]
+        target_eur = (capital * allocation * cfg.size_multiplier).quantize(Decimal("0.01"))
 
-    size_eur = min(target_eur, available_balance)
+    size_eur = min(target_eur, (available_balance * FEE_BUFFER).quantize(Decimal("0.01")))
     if size_eur <= Decimal("0"):
         logger.warning(f"{asset}: no balance available (need €{target_eur}, have €{available_balance})")
         return Decimal("0"), Decimal("0")

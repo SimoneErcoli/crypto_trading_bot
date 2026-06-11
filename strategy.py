@@ -35,9 +35,11 @@ class SignalResult:
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["rsi"]    = ta.rsi(df["close"], length=14)
+    df["ema9"]   = ta.ema(df["close"], length=9)
+    df["ema21"]  = ta.ema(df["close"], length=21)
     df["ema20"]  = ta.ema(df["close"], length=20)
     df["ema50"]  = ta.ema(df["close"], length=50)
-    df["ema200"] = ta.ema(df["close"], length=200)
+    df["ema200"] = ta.ema(df["close"], length=200) if len(df) >= 200 else float("nan")
 
     macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
     df["macd"]      = macd["MACD_12_26_9"]
@@ -69,6 +71,14 @@ def _is_bearish_divergence(df: pd.DataFrame, lookback: int = 5) -> bool:
     return price_higher and macd_lower
 
 
+def _is_ema_bearish_crossover(df: pd.DataFrame) -> bool:
+    """EMA9 crossed below EMA21 on the last closed candle — scalp momentum gone."""
+    if len(df) < 3:
+        return False
+    prev, last = df.iloc[-3], df.iloc[-2]
+    return prev["ema9"] >= prev["ema21"] and last["ema9"] < last["ema21"]
+
+
 def evaluate_signal(
     df: pd.DataFrame,
     asset: str,
@@ -78,12 +88,18 @@ def evaluate_signal(
     if cfg is None:
         cfg = get_strategy_config()
 
-    if len(df) < 200:
-        logger.warning(f"{asset}: not enough candles ({len(df)} < 200)")
+    # Scalp mode only needs the short EMAs (max length 50); swing needs EMA200.
+    min_candles = 60 if cfg.signal_mode == "scalp" else 200
+    if len(df) < min_candles:
+        logger.warning(f"{asset}: not enough candles ({len(df)} < {min_candles})")
         return SignalResult("HOLD", 0, False, False, False, 0,
                             "insufficient data", cfg.ema_ref, 0, False, 0)
 
     df = compute_indicators(df)
+
+    if cfg.signal_mode == "scalp":
+        return _evaluate_scalp(df, asset, cfg)
+
     row = df.iloc[-2]
 
     rsi       = float(row["rsi"])
@@ -143,6 +159,71 @@ def evaluate_signal(
 
     return SignalResult("HOLD", rsi, ema_above, macd_bullish, volume_surge, close,
                         "missing: " + "; ".join(missing), cfg.ema_ref, adx, ema200_above, atr)
+
+
+def _evaluate_scalp(df: pd.DataFrame, asset: str, cfg) -> SignalResult:
+    """
+    Scalping signal on short candles (15m):
+      BUY  — EMA9 > EMA21 (micro uptrend) + close > EMA50 (local trend filter)
+             + RSI in pullback/momentum band + MACD bullish + volume above average
+             + ADX confirms the move isn't pure chop.
+      SELL — RSI overbought or EMA9 crossing back below EMA21.
+    All values read from the last *closed* candle (iloc[-2]).
+    """
+    row = df.iloc[-2]
+
+    rsi       = float(row["rsi"])
+    close     = float(row["close"])
+    ema9      = float(row["ema9"])
+    ema21     = float(row["ema21"])
+    ema50     = float(row["ema50"])
+    macd_hist = float(row["macd_hist"])
+    volume    = float(row["volume"])
+    vol_ma20  = float(row["vol_ma20"])
+    adx       = float(row["adx"]) if not pd.isna(row["adx"]) else 0.0
+    atr       = float(row["atr"]) if not pd.isna(row["atr"]) else 0.0
+
+    micro_up  = ema9 > ema21
+    ema_above = close > ema50
+
+    # ── SELL conditions ───────────────────────────────────────────────────────
+    if rsi > cfg.rsi_sell:
+        return SignalResult("SELL", rsi, ema_above, False, False, close,
+                            f"RSI overbought ({rsi:.1f} > {cfg.rsi_sell})",
+                            cfg.ema_ref, adx, False, atr)
+
+    if _is_ema_bearish_crossover(df):
+        return SignalResult("SELL", rsi, ema_above, False, False, close,
+                            "EMA9 crossed below EMA21 (momentum lost)",
+                            cfg.ema_ref, adx, False, atr)
+
+    # ── BUY filters ───────────────────────────────────────────────────────────
+    rsi_ok       = cfg.rsi_buy_low <= rsi <= cfg.rsi_buy_high
+    macd_bullish = macd_hist > 0 or _is_macd_bullish_crossover(df)
+    volume_surge = vol_ma20 > 0 and volume > vol_ma20 * cfg.volume_multiplier
+    adx_ok       = adx >= cfg.adx_min
+
+    missing = []
+    if not micro_up:
+        missing.append(f"EMA9 {ema9:.2f} < EMA21 {ema21:.2f}")
+    if not ema_above:
+        missing.append(f"close {close:.2f} < EMA50 {ema50:.2f}")
+    if not rsi_ok:
+        missing.append(f"RSI={rsi:.1f} (need {cfg.rsi_buy_low}-{cfg.rsi_buy_high})")
+    if not macd_bullish:
+        missing.append("MACD not bullish")
+    if not volume_surge:
+        vol_ratio = volume / vol_ma20 if vol_ma20 > 0 else 0
+        missing.append(f"volume {vol_ratio:.2f}x (need >{cfg.volume_multiplier}x)")
+    if not adx_ok:
+        missing.append(f"ADX={adx:.1f} (need >{cfg.adx_min}, mercato laterale)")
+
+    if micro_up and ema_above and rsi_ok and macd_bullish and volume_surge and adx_ok:
+        return SignalResult("BUY", rsi, ema_above, macd_bullish, volume_surge, close,
+                            "all scalp conditions met", cfg.ema_ref, adx, False, atr)
+
+    return SignalResult("HOLD", rsi, ema_above, macd_bullish, volume_surge, close,
+                        "missing: " + "; ".join(missing), cfg.ema_ref, adx, False, atr)
 
 
 def check_exit_conditions(

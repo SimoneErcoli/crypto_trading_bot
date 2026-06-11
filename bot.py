@@ -48,8 +48,13 @@ from telegram_notify import (
     notify_startup_reconcile,
 )
 
-ASSETS = ["BTC", "ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "ATOM"]
-SCAN_INTERVAL_MINUTES = 240  # 4h
+# Asset universe and timing come from the active strategy config:
+#   conservative/aggressive → 10 assets, 4h candles, scan every 4h
+#   scalping                → BTC/ETH/SOL, 15m candles, scan every 5m
+_BOOT_CFG = rm.get_strategy_config()
+ASSETS = list(_BOOT_CFG.assets)
+SCAN_INTERVAL_MINUTES = _BOOT_CFG.scan_interval_minutes
+TIMEFRAME_MINUTES = _BOOT_CFG.timeframe_minutes
 
 # Track daily P&L (resets at midnight)
 _daily_trades: list[dict] = []
@@ -87,7 +92,7 @@ def scan_all_assets() -> None:
                 "skip_reason": f"errore: {str(exc)[:60]}",
             })
 
-    if scan_results:
+    if scan_results and _should_notify_scan(scan_results, cfg):
         try:
             notify_scan_summary(scan_results, _next_scan_time(), strategy=cfg.name)
         except Exception as exc:
@@ -96,7 +101,26 @@ def scan_all_assets() -> None:
     logger.info("── Scan complete ──")
 
 
+def _should_notify_scan(scan_results: list[dict], cfg) -> bool:
+    """
+    With a 4h scan every summary is useful; with a 5-minute scalping scan it
+    would flood Telegram. In scalp mode only notify when something actually
+    happened: a BUY/SELL signal or an error.
+    """
+    if cfg.signal_mode != "scalp":
+        return True
+    for r in scan_results:
+        if not r.get("skipped") and r.get("signal") in ("BUY", "SELL"):
+            return True
+        if "errore" in str(r.get("skip_reason", "")):
+            return True
+    return False
+
+
 def _scan_asset(asset: str, cfg=None) -> dict:
+    if cfg is None:
+        cfg = rm.get_strategy_config()
+
     # Skip if already in position
     if pm.has_active_position(asset):
         logger.info(f"{asset}: position already open — checking exit conditions")
@@ -104,14 +128,15 @@ def _scan_asset(asset: str, cfg=None) -> dict:
         return {"asset": asset, "skipped": True, "skip_reason": "posizione aperta"}
 
     # Skip if in cooldown after close
-    if pm.is_in_cooldown(asset, cooldown_hours=4):
-        logger.info(f"{asset}: in 4h cooldown after last close")
-        return {"asset": asset, "skipped": True, "skip_reason": "cooldown 4h"}
+    cooldown_h = cfg.cooldown_minutes / 60
+    if pm.is_in_cooldown(asset, cooldown_hours=cooldown_h):
+        logger.info(f"{asset}: in {cfg.cooldown_minutes}m cooldown after last close")
+        return {"asset": asset, "skipped": True, "skip_reason": f"cooldown {cfg.cooldown_minutes}m"}
 
-    # Fetch candles and evaluate signal
-    if cfg is None:
-        cfg = rm.get_strategy_config()
-    df = kc.get_ohlcv(asset, interval=240, count=200)
+    # Fetch candles and evaluate signal.
+    # count=300 ensures EMA200 has enough history to be non-NaN on the last
+    # closed candle in swing mode (Kraken returns up to 720 candles per call).
+    df = kc.get_ohlcv(asset, interval=TIMEFRAME_MINUTES, count=300)
     result = st.evaluate_signal(df, asset, cfg)
     logger.info(f"{asset}: signal={result.signal} | {result.reason}")
 
@@ -305,7 +330,7 @@ def _startup_reconcile() -> None:
             exit_price = sl_fill_price or Decimal(str(pos["sl"]))
 
             # Account for any partial closes already recorded (TP1/TP2)
-            pos_cfg      = rm.AGGRESSIVE if pos.get("strategy") == "aggressive" else rm.CONSERVATIVE
+            pos_cfg      = rm.get_config_by_name(pos.get("strategy"))
             remaining_pct = Decimal("1")
             if pos.get("tp1_hit"):
                 remaining_pct -= pos_cfg.tp1_close_pct
@@ -394,17 +419,15 @@ def daily_report() -> None:
         notify_error("daily_report", str(exc))
 
 
-def _align_to_next_4h() -> None:
-    """Sleep until the next 4h boundary (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)."""
+def _align_to_next_boundary(interval_minutes: int) -> None:
+    """Sleep until the next scan boundary (multiples of the interval from midnight UTC)."""
     now = datetime.now(timezone.utc)
-    hour_block = (now.hour // 4 + 1) * 4
-    if hour_block >= 24:
-        hour_block = 0
-        next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    else:
-        next_run = now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    minutes_into_day = (now - midnight).total_seconds() / 60
+    next_block = (int(minutes_into_day) // interval_minutes + 1) * interval_minutes
+    next_run = midnight + timedelta(minutes=next_block)
     wait_seconds = (next_run - now).total_seconds()
-    logger.info(f"Aligning to 4h candle boundary — waiting {wait_seconds:.0f}s until {next_run.strftime('%H:%M')} UTC")
+    logger.info(f"Aligning to {interval_minutes}m boundary — waiting {wait_seconds:.0f}s until {next_run.strftime('%H:%M')} UTC")
     time.sleep(max(0, wait_seconds))
 
 
@@ -456,13 +479,13 @@ def main() -> None:
         strategy=cfg.name,
     )
 
-    # Align first run to the 4h candle boundary
-    _align_to_next_4h()
+    # Align first run to the scan-interval boundary (4h for swing, 5m for scalping)
+    _align_to_next_boundary(SCAN_INTERVAL_MINUTES)
 
     # Run immediately on start (post alignment)
     scan_all_assets()
 
-    # Schedule recurring scan every 4h
+    # Schedule recurring scan
     schedule.every(SCAN_INTERVAL_MINUTES).minutes.do(scan_all_assets)
 
     # Daily report at 20:00 UTC

@@ -1,7 +1,8 @@
-# Kraken Swing Trading Bot
+# Kraken Trading Bot
 
-Bot Python autonomo che esegue una strategia di swing trading su Kraken con ordini reali,
-notifiche Telegram e monitoring via dashboard web. Gira 24/7 senza intervento umano.
+Bot Python autonomo che esegue strategie di swing trading o scalping su Kraken con
+ordini reali, notifiche Telegram e monitoring via dashboard web. Gira 24/7 senza
+intervento umano.
 
 ---
 
@@ -19,6 +20,7 @@ notifiche Telegram e monitoring via dashboard web. Gira 24/7 senza intervento um
 10. [Asset monitorati](#10-asset-monitorati)
 11. [Strategia Conservative](#11-strategia-conservative)
 12. [Strategia Aggressive](#12-strategia-aggressive)
+12b. [Strategia Scalping](#12b-strategia-scalping)
 13. [Confronto strategie](#13-confronto-strategie)
 14. [Gestione posizioni](#14-gestione-posizioni)
 15. [Struttura file](#15-struttura-file)
@@ -75,7 +77,7 @@ RISCHIO_PER_TRADE=0.015
 
 # Modalità
 PAPER_TRADING=true           # true = simulazione, false = ordini reali
-STRATEGIA=conservative       # conservative | aggressive
+STRATEGIA=conservative       # conservative | aggressive | scalping
 ```
 
 > Inizia sempre con `PAPER_TRADING=true` per verificare il funzionamento prima di andare live.
@@ -314,30 +316,93 @@ Indicata per mercati in trend con alto volume.
 
 ---
 
+## 12b. Strategia Scalping
+
+Opera solo su **BTC** (la coppia EUR più liquida su Kraken: spread stretto e book
+profondo, essenziali con target dell'1–2%; inoltre l'ordine minimo ~€10 la rende
+adatta anche a capitali piccoli). Candele da **15 minuti**, scan ogni **5 minuti**,
+una posizione alla volta, entrate in pullback dentro micro-trend rialzisti.
+
+### Segnale d'entrata (tutti devono essere veri)
+
+| Condizione | Valore |
+|-----------|--------|
+| EMA(9) > EMA(21) | micro-trend rialzista |
+| EMA(50) | prezzo sopra (filtro di trend locale) |
+| RSI(14) | tra 38 e 62 (pullback/momentum, non ipercomprato) |
+| MACD | istogramma > 0 oppure crossover bullish |
+| Volume | > 1.1× media 20 periodi |
+| ADX(14) | > 15 (esclude il puro laterale) |
+
+### Uscite
+
+| Evento | Azione |
+|--------|--------|
+| Stop loss ATR | entry − 1.2 × ATR(14), max −1.6% di cap (fallback −0.8%) |
+| TP1 +1.2% | chiude 50%, SL spostato al breakeven |
+| TP1 → trailing stop | SL segue il prezzo a −0.8% dal massimo |
+| TP2 +2.5% | chiude il restante 50%, posizione chiusa |
+| RSI > 78 | segnale SELL → chiusura immediata |
+| EMA(9) incrocia sotto EMA(21) | momentum perso → chiusura immediata |
+| Posizione piatta > 6h | time exit, capitale liberato |
+
+### Gestione fondi (specifica dello scalping)
+
+- **Equity reale, non capitale statico:** in live la size si calcola su
+  `saldo EUR + valore posizioni aperte` letti da Kraken — i profitti compongono,
+  le perdite riducono automaticamente l'esposizione.
+- **Sizing risk-based:** size = (equity × `RISCHIO_PER_TRADE`) / distanza SL,
+  cappata all'intera equity (una sola posizione): con SL a −0.8% il rischio
+  effettivo per trade è ~0.8% dell'equity.
+- **Buffer fee:** l'1% del saldo disponibile resta sempre libero per le commissioni.
+- I target sono dimensionati sulle fee Kraken: TP1 +1.2% copre con margine un
+  round-trip maker (~0.32%).
+
+### Controlli di rischio
+
+- Una sola posizione aperta alla volta
+- Cooldown 30 minuti dopo ogni chiusura
+- Entry limit cancellata se non eseguita entro 5 minuti
+- Monitor di uscita ogni 15 secondi (vs 60s dello swing)
+- Pausa globale 24h dopo 3 stop-loss consecutivi
+- Report Telegram solo su eventi reali (BUY/SELL/errori), niente spam ogni 5 min
+
+> **Quando usare Scalping:** sessioni con volatilità e volume sostenuti
+> (apertura USA, news). In mercati piatti l'ADX e il filtro volume tengono il bot
+> fermo. Le fee incidono molto sui target piccoli: evitare di abbassare i TP.
+
+---
+
 ## 13. Confronto strategie
 
-| Parametro | Conservative | Aggressive |
-|-----------|-------------|------------|
-| RSI buy | 35–50 | 30–58 |
-| EMA riferimento | EMA(50) | EMA(20) |
-| Filtro EMA(200) | Si | No |
-| Volume soglia | >1.3× | >1.1× |
-| ADX minimo | 20 | 15 |
-| RSI sell | >72 | >78 |
-| Stop loss | ATR×2.0 (max −6%) | ATR×1.5 (max −3%) |
-| TP1 | +5% → 50% | +3% → 40% |
-| TP2 | +10% → 30% | +7% → 35% |
-| TP3 | — | +15% → 25% |
-| Trailing stop | −3% dal max | −2% dal max |
-| Time exit | 96h flat | 48h flat |
-| Cooldown | 4h | 1h |
-| Max posizioni | 4 | 6 |
-| Size | 1× | 1.25× |
-| Pause dopo N SL | 2 | 3 |
+| Parametro | Conservative | Aggressive | Scalping |
+|-----------|-------------|------------|----------|
+| Asset | 10 | 10 | solo BTC |
+| Timeframe | 4h | 4h | 15m |
+| Scan | ogni 4h | ogni 4h | ogni 5 min |
+| RSI buy | 35–50 | 30–58 | 38–62 |
+| EMA riferimento | EMA(50) | EMA(20) | EMA(9)/EMA(21) + EMA(50) |
+| Filtro EMA(200) | Si | No | No |
+| Volume soglia | >1.3× | >1.1× | >1.1× |
+| ADX minimo | 20 | 15 | 15 |
+| RSI sell | >72 | >78 | >78 |
+| Stop loss | ATR×2.0 (max −6%) | ATR×1.5 (max −3%) | ATR×1.2 (max −1.6%) |
+| TP1 | +5% → 50% | +3% → 40% | +1.2% → 50% |
+| TP2 | +10% → 30% | +7% → 35% | +2.5% → 50% |
+| TP3 | — | +15% → 25% | — |
+| Trailing stop | −3% dal max | −2% dal max | −0.8% dal max |
+| Time exit | 96h flat | 48h flat | 6h flat |
+| Cooldown | 4h | 1h | 30 min |
+| Max posizioni | 4 | 6 | 1 |
+| Sizing | allocazioni fisse | allocazioni ×1.25 | risk-based su equity |
+| Timeout entry | 30 min | 30 min | 5 min |
+| Poll uscite | 60s | 60s | 15s |
+| Pause dopo N SL | 2 | 3 | 3 |
 
 ```env
 STRATEGIA=conservative   # default
 STRATEGIA=aggressive
+STRATEGIA=scalping
 ```
 
 ---

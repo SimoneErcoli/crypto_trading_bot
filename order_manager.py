@@ -36,6 +36,8 @@ from telegram_notify import (
     notify_signal_exit,
 )
 
+# Fallbacks when no strategy config is available; the active config overrides
+# these via entry_timeout_minutes / exit_poll_seconds (scalping uses 5m / 15s).
 ORDER_TIMEOUT_SECONDS = 30 * 60
 POLL_INTERVAL_SECONDS = 60
 
@@ -90,9 +92,15 @@ def close_position_on_signal(asset: str, current_price: Decimal) -> None:
 def _open_position_worker(asset: str, signal_result) -> None:
     try:
         cfg = rm.get_strategy_config()
-        capital = rm.get_capital()
         paper = rm.is_paper_trading()
-        eur_balance = capital if paper else kc.get_eur_balance()
+        if paper:
+            capital = rm.get_capital()
+            eur_balance = capital
+        else:
+            # Size against live equity (free EUR + open positions), not the
+            # static CAPITALE_TOTALE: profits compound, losses shrink exposure.
+            eur_balance = kc.get_eur_balance()
+            capital = rm.get_effective_capital(eur_balance)
         price = kc.get_ticker_price(asset)
 
         size_eur, size_asset = rm.calculate_position_size(asset, price, capital, eur_balance, cfg)
@@ -136,7 +144,7 @@ def _open_position_worker(asset: str, signal_result) -> None:
         )
         pm.save_position(asset, position)
 
-        filled = _wait_for_fill(order_id, asset)
+        filled = _wait_for_fill(order_id, asset, cfg)
         if not filled:
             _handle_expired_order(order_id, asset, price)
             return
@@ -205,15 +213,18 @@ def _is_paper_order(order_id: str) -> bool:
     return order_id.startswith("PAPER-")
 
 
-def _wait_for_fill(order_id: str, asset: str) -> bool:
+def _wait_for_fill(order_id: str, asset: str, cfg: Optional[StrategyConfig] = None) -> bool:
     # Paper orders are considered instantly filled
     if _is_paper_order(order_id):
         logger.info(f"[PAPER] {asset}: order {order_id} simulated as filled")
         return True
 
-    deadline = time.time() + ORDER_TIMEOUT_SECONDS
+    timeout = cfg.entry_timeout_minutes * 60 if cfg else ORDER_TIMEOUT_SECONDS
+    poll = cfg.exit_poll_seconds if cfg else POLL_INTERVAL_SECONDS
+
+    deadline = time.time() + timeout
     while time.time() < deadline:
-        time.sleep(POLL_INTERVAL_SECONDS)
+        time.sleep(poll)
         try:
             status = kc.get_order_status(order_id).get("status", "unknown")
             if status == "closed":
@@ -307,7 +318,12 @@ def _exit_monitor_worker(asset: str) -> None:
         except Exception as exc:
             logger.warning(f"{asset}: exit monitor error: {exc}")
 
-        time.sleep(POLL_INTERVAL_SECONDS)
+        # Scalping needs a tight poll (15s) to catch 1-2% targets; swing uses 60s.
+        try:
+            sleep_s = _load_cfg(pos).exit_poll_seconds if pos else POLL_INTERVAL_SECONDS
+        except Exception:
+            sleep_s = POLL_INTERVAL_SECONDS
+        time.sleep(sleep_s)
 
 
 def _check_native_order_fills(
@@ -616,8 +632,7 @@ def _handle_stop_loss(asset: str, pos: dict, price: Decimal) -> None:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_cfg(pos: dict) -> StrategyConfig:
-    from risk_manager import AGGRESSIVE
-    return AGGRESSIVE if pos.get("strategy") == "aggressive" else rm.CONSERVATIVE
+    return rm.get_config_by_name(pos.get("strategy"))
 
 
 def _tp1_profit(pos: dict, cfg: StrategyConfig) -> Decimal:

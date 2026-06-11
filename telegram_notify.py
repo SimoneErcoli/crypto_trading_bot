@@ -102,9 +102,9 @@ def notify_position_opened(
     atr: Optional[float] = None,
 ) -> None:
     sl_pct  = f"-{float(cfg.sl_pct)*100:.1f}%"
-    tp1_pct = f"+{int(cfg.tp1_pct * 100)}%"
-    tp2_pct = f"+{int(cfg.tp2_pct * 100)}%"
-    strategy_icon = "🔥" if cfg.name == "aggressive" else "🛡"
+    tp1_pct = f"+{float(cfg.tp1_pct)*100:.1f}%"
+    tp2_pct = f"+{float(cfg.tp2_pct)*100:.1f}%"
+    strategy_icon = {"aggressive": "🔥", "scalping": "⚡"}.get(cfg.name, "🛡")
     sl_type = f"ATR×{cfg.atr_sl_multiplier}" if atr else "fisso"
 
     lines = [
@@ -120,7 +120,7 @@ def notify_position_opened(
     ]
     if tp3 and cfg.tp3_pct:
         lines.append(f"🚀 TP3: €{tp3} (+{int(cfg.tp3_pct*100)}%) → chiude {int(cfg.tp3_close_pct*100)}%")
-    lines.append(f"📈 Trailing stop: {float(cfg.trailing_stop_pct)*100:.0f}% dopo TP1")
+    lines.append(f"📈 Trailing stop: {float(cfg.trailing_stop_pct)*100:.1f}% dopo TP1")
 
     ema_label = ema_ref.upper()
     lines += [
